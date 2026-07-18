@@ -8,7 +8,7 @@
 		<version>4.0.7</version>
 		<relativePath/> <!-- lookup parent from repository -->
 	</parent>
-	<groupId>com.store.ai</groupId>
+	<groupId>com.retail.ai</groupId>
 	<artifactId>ai-transformation-service</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name/>
