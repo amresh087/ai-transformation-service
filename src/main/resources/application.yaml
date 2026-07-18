@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: ai-transformation-service
+
+server:
+  port: 5056
+
+ollama:
+  url: http://localhost:11434/api/generate
+  embeddings-url: http://localhost:11434/api/embeddings
+  model: llama3.2:3b  
+  emd-model:  nomic-embed-text
+
+
+# Qdrant Database Configuration
+qdrant:
+  host: localhost
+  port: 6334
+  use-tls: false
+  collection-name: products
+  # If your server requires authentication, uncomment the line below:
+  # api-key: your_secret_api_key   
