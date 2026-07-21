@@ -55,50 +55,12 @@ public class OllamaService {
     String resultJsonString = null;
     ObjectMapper mapper = new ObjectMapper();
 
-    if ("CONFIRM_PACKAGING".equalsIgnoreCase(sessionMode)) {
-      
-              prompt = PromptHelper.getConfirmationPrompt(command);
-              String llmJsonString = executeOllamaCall(prompt);
-
-              ObjectNode llmRootNode = (ObjectNode) mapper.readTree(llmJsonString);
-              Boolean llmIsLooose = llmRootNode.get("isLoose").asBoolean();
-              String searchContext = llmIsLooose ? "loose" : "packet";
-              // Call our updated type-safe helper
-              String matchedIsLooseStr = searchTopProductField(searchContext, "productType");
-              // Write it back to the JSON node cleanly as an actual Boolean primitive
-              if ("loose".equals(matchedIsLooseStr)) {
-                    llmRootNode.put("isLoose", true);
-              } else if ("packet".equals(matchedIsLooseStr)) {
-                    llmRootNode.put("isLoose", false);
-              }
-              resultJsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
-
-    } else if ("BRAND_SELECTION".equalsIgnoreCase(sessionMode)) {
-       
-              prompt = PromptHelper.getBrandSelectionPrompt(command);
-              String llmJsonString = executeOllamaCall(prompt);
-              ObjectNode llmRootNode = (ObjectNode) mapper.readTree(llmJsonString);
-              String llmBrand = llmRootNode.get("brand").asString();
-              // Fetch the nearest brand match from Qdrant
-              String matchedBrand = searchTopProductField(llmBrand, "brandName");
-              llmRootNode.put("brand", matchedBrand);
-              resultJsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
-
-      } else if("TAKE_PAYMENT".equalsIgnoreCase(sessionMode)) {
-
-              prompt = PromptHelper.getPaymentIntentPrompt(command);
-              resultJsonString = executeOllamaCall(prompt);
-
-      }else if("WAITING_FOR_MOBILE_CONSENT".equalsIgnoreCase(sessionMode) 
-        || "WAITING_FOR_WALLET_CONSENT".equalsIgnoreCase(sessionMode)
-        || "WAITING_FOR_PAY_CONFIRM".equalsIgnoreCase(sessionMode) 
-        || "CONFIRM_WITHOUTMOBILE".equalsIgnoreCase(sessionMode)
-      ) {
-
-              prompt = PromptHelper.getConsentPrompt(command);
-              resultJsonString = executeOllamaCall(prompt);
-
-      }else {
+    if("EDI_XML".equalsIgnoreCase(sessionMode)){
+        prompt = PromptHelper.getEdiToXmlPrompt(command);
+        System.out.println("====prompt: === " + prompt);
+        resultJsonString = executeOllamaCall(prompt);
+    }
+     else {
 
               prompt = PromptHelper.getProductPrompt(command);
               // llm response
