@@ -1,5 +1,10 @@
 package com.retail.ai.kafka;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -28,12 +33,16 @@ public class EdiDataEventListener {
                 return;
             }
 
-            // Use OllamaService to process EDI payload into XML (sessionMode EDI_XML)
             try {
-                System.out.println("====event.getPayload(): === " + event.getPayload());
+                log.info("Processing EDI payload for document {}", event.getDocumentId());
+                String result = ollamaService.processUnified(event.getPayload(), "EDI_XML");
 
-                //String result = ollamaService.processUnified(event.getPayload(), "EDI_XML");
-                //log.info("Ollama processed EDI payload. Result summary: {}", result);
+                if (result != null && !result.isBlank()) {
+                    Path outputPath = writeXmlToFile(result, event);
+                    log.info("Created IDOC XML file at {}", outputPath.toAbsolutePath());
+                } else {
+                    log.warn("Ollama returned an empty XML result for document {}", event.getDocumentId());
+                }
             } catch (Exception ex) {
                 log.error("Failed to process EDI payload via OllamaService", ex);
             }
@@ -41,5 +50,20 @@ public class EdiDataEventListener {
         } catch (Exception e) {
             log.error("Error processing EDI data event: {}", event, e);
         }
+    }
+
+    private Path writeXmlToFile(String xmlContent, EdiDataEvent event) throws Exception {
+        Path outputDir = Paths.get(System.getProperty("user.dir"), "target", "generated-idoc");
+        Files.createDirectories(outputDir);
+
+        String baseName = event.getDocumentId();
+        if (baseName == null || baseName.isBlank()) {
+            baseName = event.getDocumentName() != null ? event.getDocumentName() : "edi-event";
+        }
+        String sanitizedName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_");
+        Path outputPath = outputDir.resolve(sanitizedName + ".xml");
+
+        Files.writeString(outputPath, xmlContent, StandardCharsets.UTF_8);
+        return outputPath;
     }
 }
