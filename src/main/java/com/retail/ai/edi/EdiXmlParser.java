@@ -55,10 +55,12 @@ public class EdiXmlParser {
 
     private String nodeToString(Node node) {
         try {
-            return new org.w3c.dom.NodeList() {
-                @Override public Node item(int index) { return null; }
-                @Override public int getLength() { return 0; }
-            }.toString();
+            javax.xml.transform.Transformer transformer = javax.xml.transform.TransformerFactory.newInstance().newTransformer();
+            transformer.setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION, "yes");
+            transformer.setOutputProperty(javax.xml.transform.OutputKeys.INDENT, "no");
+            java.io.StringWriter writer = new java.io.StringWriter();
+            transformer.transform(new javax.xml.transform.dom.DOMSource(node), new javax.xml.transform.stream.StreamResult(writer));
+            return writer.toString();
         } catch (Exception ignored) {
             return "";
         }

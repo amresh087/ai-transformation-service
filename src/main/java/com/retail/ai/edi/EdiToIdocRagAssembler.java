@@ -93,7 +93,8 @@ public class EdiToIdocRagAssembler {
         }
 
         StringBuilder xml = new StringBuilder();
-        xml.append("<ORDERS05><IDOC>");
+        xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+        xml.append("<ORDERS05><IDOC BEGIN=\"1\">");
         for (String headerFragment : headerFragments) {
             xml.append(headerFragment);
         }
@@ -140,11 +141,6 @@ public class EdiToIdocRagAssembler {
             return xml.substring(start + 1, end);
         }
         return xml;
-    }
-
-    private String buildLineItemWrapperFragment(int lineItemIndex, String validatedFragment) {
-        String posex = String.format("%05d", lineItemIndex);
-        return "<E1EDP01><POSEX>" + posex + "</POSEX>" + validatedFragment + "</E1EDP01>";
     }
 
     private String buildLineItemWrapper(int lineItemIndex, List<String> fragments) {

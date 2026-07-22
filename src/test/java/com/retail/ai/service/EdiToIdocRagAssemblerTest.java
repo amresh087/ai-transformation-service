@@ -8,7 +8,6 @@ import com.retail.ai.edi.MappingChunkProvider;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EdiToIdocRagAssemblerTest {
@@ -29,8 +28,8 @@ class EdiToIdocRagAssemblerTest {
         String ediXml = "<edi>" + buildSampleSegments(20) + "</edi>";
         EdiToIdocRagAssembler.AssemblyResult result = assembler.assemble(ediXml, "Levi's", "850");
 
-        assertTrue(result.getFinalXml().contains("<ORDERS05>"));
-        assertFalse(result.getUnmappedSegments().isEmpty() == false && result.getUnmappedSegments().isEmpty());
+        assertTrue(result.getFinalXml().contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+        assertTrue(result.getFinalXml().contains("<ORDERS05><IDOC BEGIN=\"1\">"));
         assertEquals(0, result.getUnmappedSegments().size());
         assertEquals(20, countOccurrences(result.getFinalXml(), "<E1EDP01"));
         assertTrue(result.getFinalXml().contains("<POSEX>00001</POSEX>"));
