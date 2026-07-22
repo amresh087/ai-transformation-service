@@ -55,7 +55,7 @@ public class OllamaService {
     String resultXmlString = null;
     ObjectMapper mapper = new ObjectMapper();
 
-    if("EDI_TXT".equalsIgnoreCase(sessionMode)){
+    if("EDI_XML".equalsIgnoreCase(sessionMode)){
         prompt = PromptHelper.getEdiToXmlPrompt(command);
         System.out.println("====prompt: === " + prompt);
         resultXmlString = executeOllamaCall(prompt);

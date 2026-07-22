@@ -30,8 +30,10 @@ public class EdiDataEventListener {
 
             // Use OllamaService to process EDI payload into XML (sessionMode EDI_XML)
             try {
-                String result = ollamaService.processUnified(event.getPayload(), "EDI_TXT");
-                log.info("Ollama processed EDI payload. Result summary: {}", result);
+                System.out.println("====event.getPayload(): === " + event.getPayload());
+
+                //String result = ollamaService.processUnified(event.getPayload(), "EDI_XML");
+                //log.info("Ollama processed EDI payload. Result summary: {}", result);
             } catch (Exception ex) {
                 log.error("Failed to process EDI payload via OllamaService", ex);
             }
