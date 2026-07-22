@@ -35,7 +35,7 @@ public class OllamaService {
     @Value("${ollama.embeddings-url}")
     private String embeddingsUrl;
 
-    @Value("${ollama.emd-model}")
+    @Value("${ollama.embedding-model}")
     private String emdModel;
 
     public OllamaService(RestTemplate restTemplate, QdrantClient qdrantClient) {
@@ -52,13 +52,18 @@ public class OllamaService {
      */
     public String processUnified(String command, String sessionMode) throws RuntimeException {
     String prompt;
-    String resultJsonString = null;
+    String resultXmlString = null;
     ObjectMapper mapper = new ObjectMapper();
 
-    if("EDI_XML".equalsIgnoreCase(sessionMode)){
+    if("EDI_TXT".equalsIgnoreCase(sessionMode)){
         prompt = PromptHelper.getEdiToXmlPrompt(command);
         System.out.println("====prompt: === " + prompt);
-        resultJsonString = executeOllamaCall(prompt);
+        resultXmlString = executeOllamaCall(prompt);
+
+        System.out.println("====resultXmlString: === " + resultXmlString);
+
+        System.out.println("====================");
+        
     }
      else {
 
@@ -72,16 +77,16 @@ public class OllamaService {
                     // Fetch the nearest product name match from Qdrant
                     String matchedProductName = searchTopProductField(llMProductName, "name");
                     llmRootNode.put("productName", matchedProductName);
-                    resultJsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
+                    resultXmlString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
 
               } else {
                     // Fallback if intent is not ADD_ITEM but you still need to return the raw
                     // response
-                    resultJsonString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
+                    resultXmlString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
               }
     }
 
-    return resultJsonString;
+    return resultXmlString;
 }
 
 /**

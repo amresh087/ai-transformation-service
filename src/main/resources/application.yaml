@@ -1,22 +1,36 @@
+server:
+  port: 5056
+
 spring:
   application:
     name: ai-transformation-service
 
-server:
-  port: 5056
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: ai-transformation-service-group
+      auto-offset-reset: latest
+      enable-auto-commit: true
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: "*"
+
+app:
+  kafka:
+    topic:
+      edi-data-event: edi-data-event
 
 ollama:
   url: http://localhost:11434/api/generate
   embeddings-url: http://localhost:11434/api/embeddings
-  model: llama3.2:3b  
-  emd-model:  nomic-embed-text
+  model: llama3.2:3b
+  embedding-model: nomic-embed-text
 
-
-# Qdrant Database Configuration
 qdrant:
   host: localhost
   port: 6334
   use-tls: false
   collection-name: products
-  # If your server requires authentication, uncomment the line below:
-  # api-key: your_secret_api_key   
+  # api-key: your_secret_api_key
