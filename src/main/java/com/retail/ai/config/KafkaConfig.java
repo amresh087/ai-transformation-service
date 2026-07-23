@@ -13,13 +13,16 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
+import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.ConsumerRecordRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.util.backoff.FixedBackOff;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import org.springframework.util.backoff.FixedBackOff;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import com.retail.ai.dto.EdiDataEvent;
 
@@ -83,7 +86,13 @@ public class KafkaConfig {
             DefaultErrorHandler errorHandler) {
         ConcurrentKafkaListenerContainerFactory<String, EdiDataEvent> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
         factory.setCommonErrorHandler(errorHandler);
         return factory;
+    }
+
+    @Bean
+    public ExecutorService ediDataEventExecutorService() {
+        return Executors.newFixedThreadPool(2);
     }
 }

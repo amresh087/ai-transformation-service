@@ -39,9 +39,10 @@ class QdrantMappingChunkProviderTest {
         future.set(List.of(scoredPoint));
         when(qdrantClient.searchAsync(any(Points.SearchPoints.class))).thenReturn(future);
 
-        String chunk = provider.fetchMappingChunk("tenant-a", "ORDERS", "UNH", "<segment>header</segment>");
+        MappingChunkResult chunkResult = provider.fetchMappingChunk("tenant-a", "ORDERS", "UNH", "<segment>header</segment>");
 
-        assertEquals("header mapping chunk", chunk);
+        assertEquals("header mapping chunk", chunkResult.getChunkText());
+        assertEquals(0.0, chunkResult.getScore());
         verify(ollamaService).createEmbedding(any(EmbeddingRequest.class));
     }
 }

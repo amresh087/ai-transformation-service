@@ -32,5 +32,8 @@ qdrant:
   host: localhost
   port: 6334
   use-tls: false
-  collection-name: products
+  collection-name: mapping-documents
   # api-key: your_secret_api_key
+
+mapping:
+  similarity-threshold: 0.60

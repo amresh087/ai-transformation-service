@@ -22,12 +22,19 @@ public class QdrantMappingChunkProvider implements MappingChunkProvider {
     @Value("${qdrant.collection-name:xslt_mappings}")
     private String collectionName;
 
+    @Value("${mapping.similarity-threshold:0.60}")
+    private double similarityThreshold;
+
     @Override
-    public String fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName, String rawSegment) {
+    public MappingChunkResult fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName, String rawSegment) {
         try {
             String queryText = buildQueryText(tenant, transactionTypeCode, segmentName, rawSegment);
             List<Double> embedding = ollamaService.createEmbedding(
                     EmbeddingRequest.builder().prompt(queryText).build()).getEmbedding();
+
+            if (embedding == null || embedding.isEmpty()) {
+                return MappingChunkResult.empty();
+            }
 
             List<Float> queryVector = embedding.stream().map(Double::floatValue).toList();
             Points.SearchPoints searchPoints = Points.SearchPoints.newBuilder()
@@ -38,18 +45,20 @@ public class QdrantMappingChunkProvider implements MappingChunkProvider {
                     .build();
             List<Points.ScoredPoint> results = qdrantClient.searchAsync(searchPoints).get();
             if (results == null || results.isEmpty()) {
-                return null;
+                return MappingChunkResult.empty();
             }
             Points.ScoredPoint scoredPoint = results.get(0);
+            String chunkText = null;
             if (scoredPoint.getPayloadMap().containsKey("xsltChunkText")) {
-                return scoredPoint.getPayloadMap().get("xsltChunkText").getStringValue();
+                chunkText = scoredPoint.getPayloadMap().get("xsltChunkText").getStringValue();
             }
-            return null;
+            double score = scoredPoint.getScore();
+            return MappingChunkResult.of(chunkText, score, similarityThreshold);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return null;
+            return MappingChunkResult.empty();
         } catch (ExecutionException e) {
-            return null;
+            return MappingChunkResult.empty();
         }
     }
 
@@ -59,5 +68,9 @@ public class QdrantMappingChunkProvider implements MappingChunkProvider {
                 transactionTypeCode != null ? transactionTypeCode : "",
                 segmentName != null ? segmentName : "",
                 rawSegment != null ? rawSegment : "");
+    }
+
+    public double getSimilarityThreshold() {
+        return similarityThreshold;
     }
 }

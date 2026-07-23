@@ -28,13 +28,17 @@ public class SegmentHierarchyRuleResolver {
             return SegmentHierarchyRole.BELONGS_TO_LINE_ITEM;
         }
 
-        Set<String> headerSegments = Set.of("UNB", "UNH", "BGM", "DTM", "NAD", "RFF", "CUX", "PAT", "PIA", "IMD");
+        Set<String> headerSegments = Set.of("UNB", "UNH", "BGM", "DTM", "NAD", "RFF", "CUX", "PAT");
         if (headerSegments.contains(upper)) {
             return SegmentHierarchyRole.HEADER;
         }
 
         if ("LIN".equals(upper)) {
             return SegmentHierarchyRole.STARTS_LINE_ITEM;
+        }
+
+        if (Set.of("PIA", "IMD").contains(upper)) {
+            return SegmentHierarchyRole.BELONGS_TO_LINE_ITEM;
         }
 
         if (Set.of("QTY", "PRI").contains(upper)) {

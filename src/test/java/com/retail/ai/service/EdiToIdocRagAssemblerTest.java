@@ -3,8 +3,10 @@ package com.retail.ai.service;
 import com.retail.ai.dto.CompletionRequest;
 import com.retail.ai.dto.CompletionResponse;
 import com.retail.ai.edi.EdiToIdocRagAssembler;
-import com.retail.ai.edi.SegmentHierarchyRuleResolver;
 import com.retail.ai.edi.MappingChunkProvider;
+import com.retail.ai.edi.MappingChunkResult;
+import com.retail.ai.edi.SegmentHierarchyRuleResolver;
+import com.retail.ai.service.CompletionService;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -15,7 +17,7 @@ class EdiToIdocRagAssemblerTest {
     @Test
     void shouldAssembleTwentyLineItemsAndLeaveNoUnmappedSegments() {
         SegmentHierarchyRuleResolver resolver = new SegmentHierarchyRuleResolver("default", "Levi's", "850");
-        MappingChunkProvider mappingChunkProvider = (tenant, transactionTypeCode, segmentName, rawSegment) -> "mapping for " + segmentName;
+        MappingChunkProvider mappingChunkProvider = (tenant, transactionTypeCode, segmentName, rawSegment) -> MappingChunkResult.of("mapping for " + segmentName, 0.95, 0.60);
         CompletionService completionService = new CompletionService() {
             @Override
             public CompletionResponse generateCompletion(CompletionRequest request) {
@@ -23,7 +25,7 @@ class EdiToIdocRagAssemblerTest {
             }
         };
 
-        EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(resolver, mappingChunkProvider, completionService);
+        EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(resolver, mappingChunkProvider, completionService, new com.retail.ai.edi.DeterministicEdiToIdocMapper());
 
         String ediXml = "<edi>" + buildSampleSegments(20) + "</edi>";
         EdiToIdocRagAssembler.AssemblyResult result = assembler.assemble(ediXml, "Levi's", "850");
@@ -61,5 +63,60 @@ class EdiToIdocRagAssemblerTest {
             idx += token.length();
         }
         return count;
+    }
+
+    @Test
+    void shouldEmbedDeterministicHeaderAndNumberLineItemsByTens() {
+        SegmentHierarchyRuleResolver resolver = new SegmentHierarchyRuleResolver("default", "Levi's", "850");
+        MappingChunkProvider mappingChunkProvider = (tenant, transactionTypeCode, segmentName, rawSegment) -> MappingChunkResult.of("mapping for " + segmentName, 0.95, 0.60);
+        CompletionService completionService = new CompletionService() {
+            @Override
+            public CompletionResponse generateCompletion(CompletionRequest request) {
+                return CompletionResponse.builder().text("<fragment><MENGE>10</MENGE></fragment>").build();
+            }
+        };
+
+        EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(resolver, mappingChunkProvider, completionService, new com.retail.ai.edi.DeterministicEdiToIdocMapper());
+
+        String ediXml = "<edi>"
+                + "<segment name=\"UNB\"><field>UNOA:3</field><field>SENDER</field><field>RECEIVER</field></segment>"
+                + "<segment name=\"BGM\"><field>220</field><field>PO12345</field></segment>"
+                + "<segment name=\"DTM\"><field>137:20260717:102</field></segment>"
+                + "<segment name=\"CUX\"><field>2:USD</field></segment>"
+                + "<segment name=\"RFF\"><field>ON:PO12345</field></segment>"
+                + "<segment name=\"UNH\"><field>1</field></segment>"
+                + "<segment name=\"LIN\"><field>100:PCE</field></segment>"
+                + "<segment name=\"QTY\"><field>21:5</field></segment>"
+                + "<segment name=\"PRI\"><field>AAA:105</field></segment>"
+                + "</edi>";
+        EdiToIdocRagAssembler.AssemblyResult result = assembler.assemble(ediXml, "Levi's", "850");
+
+        assertTrue(result.getFinalXml().contains("<EDI_DC40>"));
+        assertTrue(result.getFinalXml().contains("<E1EDK01>"));
+        assertTrue(result.getFinalXml().contains("<DOCNUM>1</DOCNUM>"));
+        assertTrue(result.getFinalXml().contains("<SNDPRN>SENDER</SNDPRN>"));
+        assertTrue(result.getFinalXml().contains("<RCVPRN>RECEIVER</RCVPRN>"));
+        assertTrue(result.getFinalXml().contains("<BELNR>PO12345</BELNR>"));
+        assertTrue(result.getFinalXml().contains("<WAERK>USD</WAERK>"));
+        assertTrue(result.getFinalXml().contains("<POSEX>00010</POSEX>"));
+    }
+
+    @Test
+    void shouldRejectStylesheetEchoFromLlm() {
+        SegmentHierarchyRuleResolver resolver = new SegmentHierarchyRuleResolver("default", "Levi's", "850");
+        MappingChunkProvider mappingChunkProvider = (tenant, transactionTypeCode, segmentName, rawSegment) -> MappingChunkResult.of("mapping for " + segmentName, 0.95, 0.60);
+        CompletionService completionService = new CompletionService() {
+            @Override
+            public CompletionResponse generateCompletion(CompletionRequest request) {
+                return CompletionResponse.builder().text("<xsl:template match=\"/\">\n<field>MATNR</field>\n</xsl:template>").build();
+            }
+        };
+
+        EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(resolver, mappingChunkProvider, completionService, new com.retail.ai.edi.DeterministicEdiToIdocMapper());
+        String ediXml = "<edi><segment name=\"IMD\"><field>ABC</field></segment></edi>";
+        EdiToIdocRagAssembler.AssemblyResult result = assembler.assemble(ediXml, "Levi's", "850");
+
+        assertEquals(1, result.getUnmappedSegments().size());
+        assertEquals("IMD", result.getUnmappedSegments().get(0));
     }
 }
