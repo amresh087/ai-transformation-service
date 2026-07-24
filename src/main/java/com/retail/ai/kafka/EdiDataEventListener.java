@@ -81,14 +81,7 @@ public class EdiDataEventListener {
                         assemblyResult.getSegmentResults() != null ? assemblyResult.getSegmentResults().size() : 0,
                         assemblyResult.getUnmappedSegments() != null ? assemblyResult.getUnmappedSegments().size() : 0);
                 idocXmlStorageService.storeGeneratedXml(assemblyResult.getFinalXml(), event);
-            } else {
-                log.warn("Assembler produced no successful mapped fragments for document {}, falling back to Ollama", event.getDocumentId());
-                String fallbackResult = ollamaService.processUnified(event.getPayload(), "EDI_XML");
-                if (fallbackResult != null && !fallbackResult.isBlank()) {
-                    idocXmlStorageService.storeGeneratedXml(fallbackResult, event);
-                } else {
-                    log.error("Fallback Ollama processing also returned no result for document {}", event.getDocumentId());
-                }
+            
             }
         } catch (Exception ex) {
             log.error("Failed to process EDI payload via RAG assembler for document {}", event.getDocumentId(), ex);

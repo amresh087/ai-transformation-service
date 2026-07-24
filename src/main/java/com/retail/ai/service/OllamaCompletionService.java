@@ -29,9 +29,9 @@ public class OllamaCompletionService implements CompletionService {
         payload.put("prompt", request.getPrompt());
         payload.put("stream", false);
 
-        System.out.println("Ollama URL:==========> " + ollamaUrl);
-        System.out.println("Ollama Model: =======> " + model);
-        System.out.println("Prompt: =============> " + request.getPrompt());
+       // System.out.println("Ollama URL:==========> " + ollamaUrl);
+       // System.out.println("Ollama Model: =======> " + model);
+       // System.out.println("Prompt: =============> " + request.getPrompt());
         
 
 

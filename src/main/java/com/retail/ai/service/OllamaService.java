@@ -65,26 +65,8 @@ public class OllamaService {
         System.out.println("====================");
         
     }
-     else {
-
-              prompt = PromptHelper.getProductPrompt(command);
-              // llm response
-              String llmJsonString = executeOllamaCall(prompt);
-              ObjectNode llmRootNode = (ObjectNode) mapper.readTree(llmJsonString);
-              String llmIntent = llmRootNode.get("intent").asString();
-              if ("ADD_ITEM".equalsIgnoreCase(llmIntent)) {
-                    String llMProductName = llmRootNode.get("productName").asString();
-                    // Fetch the nearest product name match from Qdrant
-                    String matchedProductName = searchTopProductField(llMProductName, "name");
-                    llmRootNode.put("productName", matchedProductName);
-                    resultXmlString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
-
-              } else {
-                    // Fallback if intent is not ADD_ITEM but you still need to return the raw
-                    // response
-                    resultXmlString = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(llmRootNode);
-              }
-    }
+     
+    
 
     return resultXmlString;
 }

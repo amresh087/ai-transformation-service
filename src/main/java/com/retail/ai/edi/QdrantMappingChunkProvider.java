@@ -1,16 +1,19 @@
 package com.retail.ai.edi;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
 import com.retail.ai.dto.EmbeddingRequest;
 import com.retail.ai.service.OllamaService;
+
 import io.qdrant.client.QdrantClient;
 import io.qdrant.client.WithPayloadSelectorFactory;
 import io.qdrant.client.grpc.Points;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-
-import java.util.List;
-import java.util.concurrent.ExecutionException;
 
 @Service
 @RequiredArgsConstructor
@@ -26,40 +29,56 @@ public class QdrantMappingChunkProvider implements MappingChunkProvider {
     private double similarityThreshold;
 
     @Override
-    public MappingChunkResult fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName, String rawSegment) {
+    public List<MappingChunk> fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName,
+            String rawSegment) {
         try {
             String queryText = buildQueryText(tenant, transactionTypeCode, segmentName, rawSegment);
-            List<Double> embedding = ollamaService.createEmbedding(
-                    EmbeddingRequest.builder().prompt(queryText).build()).getEmbedding();
-
-            if (embedding == null || embedding.isEmpty()) {
-                return MappingChunkResult.empty();
-            }
+            List<Double> embedding = ollamaService.createEmbedding(EmbeddingRequest.builder().prompt(queryText).build())
+                    .getEmbedding();
 
             List<Float> queryVector = embedding.stream().map(Double::floatValue).toList();
+
             Points.SearchPoints searchPoints = Points.SearchPoints.newBuilder()
                     .setCollectionName(collectionName)
                     .addAllVector(queryVector)
-                    .setLimit(1)
+                    .setLimit(3)
                     .setWithPayload(WithPayloadSelectorFactory.enable(true))
                     .build();
+
             List<Points.ScoredPoint> results = qdrantClient.searchAsync(searchPoints).get();
-            if (results == null || results.isEmpty()) {
-                return MappingChunkResult.empty();
+
+            List<MappingChunk> mappings = new ArrayList<>();
+
+            for (Points.ScoredPoint point : results) {
+
+                String chunk = point.getPayloadMap()
+                        .getOrDefault("xsltChunkText", null)
+                        .getStringValue();
+
+                String xsltSegment = "";
+
+                if (point.getPayloadMap().containsKey("segmentName")) {
+                    xsltSegment = point.getPayloadMap()
+                            .get("segmentName")
+                            .getStringValue();
+                }
+
+                mappings.add(
+                        MappingChunk.builder()
+                                .chunkText(chunk)
+                                .score(point.getScore())
+                                .segmentName(xsltSegment)
+                                .build());
             }
-            Points.ScoredPoint scoredPoint = results.get(0);
-            String chunkText = null;
-            if (scoredPoint.getPayloadMap().containsKey("xsltChunkText")) {
-                chunkText = scoredPoint.getPayloadMap().get("xsltChunkText").getStringValue();
-            }
-            double score = scoredPoint.getScore();
-            return MappingChunkResult.of(chunkText, score, similarityThreshold);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return MappingChunkResult.empty();
-        } catch (ExecutionException e) {
-            return MappingChunkResult.empty();
+
+            return mappings;
+
+        } catch (Exception e) {
+            return Collections.emptyList();
+
         }
+
+        
     }
 
     private String buildQueryText(String tenant, String transactionTypeCode, String segmentName, String rawSegment) {

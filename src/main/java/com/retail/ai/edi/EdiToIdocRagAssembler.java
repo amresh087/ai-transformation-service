@@ -1,14 +1,8 @@
 package com.retail.ai.edi;
 
-import com.retail.ai.dto.CompletionRequest;
-import com.retail.ai.dto.CompletionResponse;
-import com.retail.ai.service.CompletionService;
-import lombok.Data;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.xml.sax.InputSource;
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.util.List;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.OutputKeys;
@@ -16,11 +10,20 @@ import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-import java.io.StringReader;
-import java.io.StringWriter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.xml.sax.InputSource;
+
+import com.retail.ai.dto.CompletionRequest;
+import com.retail.ai.dto.CompletionResponse;
+import com.retail.ai.service.CompletionService;
+import com.retail.ai.utilty.PromptHelper;
+
+import lombok.Builder;
+import lombok.Data;
 
 public class EdiToIdocRagAssembler {
 
@@ -43,116 +46,129 @@ public class EdiToIdocRagAssembler {
         this.headerBuilder = new DeterministicIdocHeaderBuilder();
     }
 
-    public AssemblyResult assemble(String ediXml, String tenant, String transactionTypeCode) {
-        EdiXmlParser parser = new EdiXmlParser();
-        List<EdiSegment> segments = parser.parse(ediXml);
+    
 
-        List<String> headerFragments = new ArrayList<>();
-        List<String> lineItemFragments = new ArrayList<>();
-        List<String> unmappedSegments = new ArrayList<>();
-        List<SegmentResult> segmentResults = new ArrayList<>();
+public AssemblyResult assemble(String ediXml, String tenant, String transactionTypeCode) {
 
-        DeterministicIdocHeaderBuilder.HeaderBuildResult headerBuildResult = headerBuilder.buildHeaderFragments(segments);
-        headerFragments.addAll(headerBuildResult.getFragments());
-        Set<Integer> headerHandledIndexes = headerBuildResult.getHandledSegmentIndices();
+    log.info("========== IDOC Assembly Started ==========");
+    log.info("Tenant: {}, TransactionType: {}", tenant, transactionTypeCode);
 
-        List<String> currentLineItemFragments = new ArrayList<>();
-        int lineItemIndex = 10;
-        boolean hasContent = !headerFragments.isEmpty();
+    EdiXmlParser parser = new EdiXmlParser();
+    List<EdiSegment> segments = parser.parse(ediXml);
 
-        for (EdiSegment segment : segments) {
-            if (headerHandledIndexes.contains(segment.getSequenceIndex())) {
-                segmentResults.add(SegmentResult.skipped(segment.getName()));
-                continue;
-            }
-            SegmentHierarchyRole role = resolver.roleFor(segment.getName(), segment.getRawXml());
-            if (role == SegmentHierarchyRole.STARTS_LINE_ITEM && !currentLineItemFragments.isEmpty()) {
-                lineItemFragments.add(buildLineItemWrapper(lineItemIndex, currentLineItemFragments));
-                currentLineItemFragments.clear();
-                lineItemIndex += 10;
-            }
-            String fragment = tryDeterministicMapping(segment);
-            if (fragment != null) {
-                segmentResults.add(SegmentResult.success(segment.getName(), fragment));
-                hasContent = appendFragment(role, fragment, currentLineItemFragments, headerFragments, lineItemFragments, lineItemIndex) || hasContent;
-                continue;
-            }
+    log.info("Total EDI Segments Parsed: {}", segments.size());
 
-            MappingChunkResult chunkResult = mappingChunkProvider.fetchMappingChunk(tenant, transactionTypeCode, segment.getName(), segment.getRawXml());
-            if (chunkResult == null || chunkResult.isEmpty()) {
-                unmappedSegments.add(segment.getName());
-                segmentResults.add(SegmentResult.failure(segment.getName(), "No mapping chunk"));
-                continue;
-            }
+    // Initial empty IDOC
+    String currentIdocXml = """
+            <ORDERS05>
+                <IDOC BEGIN="1">
+                </IDOC>
+            </ORDERS05>
+            """;
 
-            if (chunkResult.getScore() < chunkResult.getThreshold()) {
-                log.warn("Rejecting mapping chunk for segment {} because score {} is below threshold {}", segment.getName(), chunkResult.getScore(), chunkResult.getThreshold());
-                unmappedSegments.add(segment.getName());
-                segmentResults.add(SegmentResult.failure(segment.getName(), "Low similarity score"));
-                continue;
-            }
+    int segmentNo = 1;
 
-            if (!chunkContainsSegmentName(chunkResult.getChunkText(), segment.getName())) {
-                log.warn("Mapping chunk for segment {} did not explicitly mention the segment name. Candidate chunk may be wrong. Chunk text starts: {}", segment.getName(), chunkResult.getChunkText() == null ? "<empty>" : chunkResult.getChunkText().replaceAll("\n", " ").strip());
-            }
+    for (EdiSegment segment : segments) {
 
-            CompletionRequest request = CompletionRequest.builder()
-                    .prompt(buildPrompt(chunkResult.getChunkText(), segment.getRawXml()))
-                    .tenant(tenant)
-                    .transactionTypeCode(transactionTypeCode)
-                    .segmentName(segment.getName())
-                    .build();
-            CompletionResponse completionResponse = completionService.generateCompletion(request);
-            String completionText = completionResponse != null && completionResponse.getText() != null ? completionResponse.getText() : "";
-            log.info("Raw LLM completion for segment {}: [{}]", segment.getName(), completionText);
+        System.out.println("--------------------------********************************************------------------------------");
 
-            String validatedFragment = validateAndNormalize(completionText);
-            if (validatedFragment == null) {
-                unmappedSegments.add(segment.getName());
-                segmentResults.add(SegmentResult.failure(segment.getName(), "Invalid or empty XML"));
-                continue;
-            }
+        System.out.println(String.format("---->Processing Segment %d/%d", segmentNo++, segments.size()));
+        System.out.println(String.format("----> Segment Name : %s", segment.getName()));
+        System.out.println(String.format("-----> Segment XML :%n%s", segment.getRawXml()));
 
-            segmentResults.add(SegmentResult.success(segment.getName(), validatedFragment));
-            hasContent = appendFragment(role, validatedFragment, currentLineItemFragments, headerFragments, lineItemFragments, lineItemIndex);
+        long retrievalStart = System.currentTimeMillis();
+
+        List<MappingChunk> mappingChunks =
+                mappingChunkProvider.fetchMappingChunk(
+                        tenant,
+                        transactionTypeCode,
+                        segment.getName(),
+                        segment.getRawXml());
+
+        long retrievalEnd = System.currentTimeMillis();
+
+        System.out.println("---> Vector Search Time : " + (retrievalEnd - retrievalStart));
+
+        if (mappingChunks == null || mappingChunks.isEmpty()) {
+            System.out.println("---->No mapping chunks found for segment " + segment.getName());
+            continue;
         }
 
-        if (!currentLineItemFragments.isEmpty()) {
-            lineItemFragments.add(buildLineItemWrapper(lineItemIndex, currentLineItemFragments));
+        // Build prompt with previous IDOC
+        String prompt = PromptHelper.buildPromptIDocMapping(
+                segment,
+                mappingChunks,
+                currentIdocXml);
+
+        // System.out.println("---->Generated Prompt: " + prompt);
+
+        CompletionRequest request = new CompletionRequest();
+        request.setPrompt(prompt);
+
+        System.out.println("---->Calling LLM...");
+
+        long llmStart = System.currentTimeMillis();
+
+        CompletionResponse response = completionService.generateCompletion(request);
+
+        long llmEnd = System.currentTimeMillis();
+
+        System.out.println("--->LLM Response Time :" + (llmEnd - llmStart) + " ms");
+
+        String completionText =
+                response != null && response.getText() != null
+                        ? response.getText().trim()
+                        : "";
+
+        System.out.println("---> LLM Response Length : " + completionText.length());
+        System.out.println("--->LLM Generated XML: " + completionText);
+
+        if (completionText.isBlank()) {
+            System.err.println("----> Segment " + segment.getName() + " returned empty response.");
+            continue;
         }
 
-        StringBuilder xml = new StringBuilder();
-        xml.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-        xml.append("<ORDERS05><IDOC BEGIN=\"1\">");
-        for (String headerFragment : headerFragments) {
-            xml.append(headerFragment);
+        if ("<unmapped/>".equalsIgnoreCase(completionText)) {
+            System.err.println("----> Segment " + segment.getName() + " could not be mapped.");
+            continue;
         }
-        for (String lineItemFragment : lineItemFragments) {
-            xml.append(lineItemFragment);
+
+        /*
+        
+        // Validate response
+        if (!completionText.startsWith("<ORDERS05")) {
+            System.err.println("----> Invalid IDOC returned by LLM for segment " + segment.getName());
+            continue;
         }
-        xml.append("</IDOC></ORDERS05>");
+    */
 
-        return new AssemblyResult(xml.toString(), segmentResults, unmappedSegments, hasContent);
-    }
+        // Update current IDOC
+        currentIdocXml = completionText;
 
-    private String tryDeterministicMapping(EdiSegment segment) {
+        System.out.println("*******************************************");
+        System.out.println(currentIdocXml);
+        System.out.println("*******************************************");
+
+        System.err.println("--->Segment " + segment.getName() + " successfully merged into IDOC.");
+
         try {
-            String deterministic = deterministicMapper.map(segment);
-            if (deterministic == null || deterministic.isBlank()) {
-                return null;
-            }
-            String normalized = validateAndNormalize(deterministic);
-            if (normalized == null) {
-                log.warn("Deterministic mapper produced invalid XML for segment {}: {}", segment.getName(), deterministic);
-                return null;
-            }
-            log.info("Deterministic mapping used for segment {} (no LLM call)", segment.getName());
-            return normalized;
-        } catch (Exception ex) {
-            log.warn("Deterministic mapping failed for segment {}", segment.getName(), ex);
-            return null;
+            System.out.println("Waiting 5 seconds before next LLM call...");
+            Thread.sleep(5_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("Thread interrupted while waiting.");
+            break;
         }
     }
+
+    System.out.println("========== IDOC Assembly Completed ==========");
+    System.out.println("------>Final IDOC Length : " + currentIdocXml.length());
+    System.err.println("---------> Final IDOC : ");
+    System.err.println(currentIdocXml);
+
+    // TODO: Parse currentIdocXml into your AssemblyResult
+    return null;
+}
 
     private boolean appendFragment(SegmentHierarchyRole role,
                                    String fragment,
@@ -188,15 +204,10 @@ public class EdiToIdocRagAssembler {
         return normalized.contains(candidate);
     }
 
-    private String buildPrompt(String mappingChunk, String segmentXml) {
-        return "Use the following XSLT mapping chunk to generate only the IDOC XML fragment for this EDI segment. "
-                + "Do not echo the mapping chunk, do not return the XSLT mapping chunk, do not return any XML declaration, "
-                + "and do not wrap the result in any additional documents or markdown fences. "
-                + "Return only valid XML element content suitable for insertion inside an ORDERS05/IDOC document. "
-                + "If you are unsure, return <unmapped/>.\n\n"
-                + "Mapping chunk:\n" + mappingChunk + "\n\n"
-                + "EDI segment XML:\n" + segmentXml;
-    }
+    
+
+
+    
 
     private String validateAndNormalize(String fragment) {
         if (fragment == null || fragment.isBlank()) {
@@ -278,7 +289,10 @@ public class EdiToIdocRagAssembler {
         return xml.toString();
     }
 
+   
+
     @Data
+    @Builder
     public static class AssemblyResult {
         private final String finalXml;
         private final List<SegmentResult> segmentResults;

@@ -1,5 +1,7 @@
 package com.retail.ai.edi;
 
+import java.util.List;
+
 public interface MappingChunkProvider {
-    MappingChunkResult fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName, String rawSegment);
+    List<MappingChunk> fetchMappingChunk(String tenant, String transactionTypeCode, String segmentName, String rawSegment);
 }
