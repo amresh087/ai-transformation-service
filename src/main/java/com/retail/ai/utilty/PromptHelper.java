@@ -77,7 +77,7 @@ public class PromptHelper {
                 DO NOT COPY VALUES FROM THE GOLDEN EXAMPLE (HARD RULE)
                 ==================================================
 
-                The GOLDEN EXAMPLE below (qualifiers "SU"/"BY", item IDs
+                The GOLDEN EXAMPLE below (qualifiers "SE"/"BY", item IDs
                 "ITEM1001A"/"ITEM1002", dates, prices, etc.) is FICTIONAL
                 sample data used ONLY to teach you the output PATTERN and
                 STRUCTURE. It is not real input.
@@ -124,7 +124,7 @@ public class PromptHelper {
                        value for EDI_DC40/CREDAT.
 
                 NAD, party segment
-                    field 1 = party qualifier (BY = buyer, SU or SE = supplier/seller)
+                    field 1 = party qualifier (BY = buyer, SE = supplier)
                     field 2 = optional internal id, field 3 = party identifier
                     -> creates ONE E1EDKA1 segment per distinct NAD:
                          E1EDKA1/PARVW = the qualifier, copied verbatim from
@@ -267,7 +267,7 @@ public class PromptHelper {
 
                     DTM: 137:20260722:102
                     NAD: BY, 92, BUYERID::92
-                    NAD: SU, 92, SUPPLIERID::92
+                    NAD: SE, 92, SUPPLIERID::92
                     CUX: 2:EUR:4
                     LIN: 1, ITEM1001A:SA, 2, ITEM1002:IN
                     IMD: F, ::WIDGET
