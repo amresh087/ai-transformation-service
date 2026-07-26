@@ -2,28 +2,41 @@ package com.retail.ai.edi;
 
 // NOTE: adjust package/imports to match your actual project structure.
 //
-// This does two different kinds of work on purpose:
+// CHANGES IN THIS VERSION (fixes for the SU-party / ITEM1003 bugs):
 //
-//   1. autoFix(xml)   -- fixes issues that are 100% mechanical and safe to
-//      fix with code, with NO risk of guessing wrong: adding a missing
-//      BEGIN="1" attribute, adding a missing <TABNAM>, stripping ":::"
-//      suffixes off PARTN, zero-padding CREDAT. These never require
-//      re-calling the LLM.
+//   1. validate(...) gained two new checks:
+//        a) "extraneous PARVW" -- any PARVW in the output that is NOT in
+//           expectedParvwCodes is now an error, not just a missing one.
+//           This is what would have caught the fabricated PARVW="SU"
+//           E1EDKA1 that had no corresponding source NAD segment at all.
+//        b) content-aware regression -- checkNoRegression previously only
+//           confirmed a POSEX/PARVW *key* still existed. It did NOT check
+//           that the *content* under that key was unchanged, which is
+//           exactly how POSEX="1" got silently swapped from
+//           (ITEM1001/ITEM1001A, NETWR 15.50, WIDGET) to a fabricated
+//           (ITEM1003, NETWR 40.00, no text) while still reporting
+//           "no regression" because the key "1" was technically present.
+//           checkNoRegressionContent below fixes this by diffing scalar
+//           fields exactly and repeating child groups (E1EDP19/E1EDP20/
+//           E1EDPT1) as a subset requirement.
 //
-//   2. validate(xml, previousIdocXml, expectedCredat, expectedParvwCodes)
-//      -- checks for issues that CANNOT be safely auto-fixed in code
-//      because fixing them requires re-deriving a mapping decision (e.g.
-//      "which E1EDP19 code goes with this line item" is exactly the
-//      judgment call we're asking the LLM to make), OR checks that need
-//      ground-truth values extracted from the original EDI segments
-//      (CREDAT must match UNB's date, PARVW must match NAD's qualifier
-//      verbatim). These come back as a list of human-readable errors that
-//      you feed back into a corrective re-prompt.
- 
+//   2. buildCorrectivePrompt(...) now takes the ORIGINAL batch segments'
+//      raw text and the idocBeforeBatch snapshot, and includes them
+//      verbatim in the corrective re-prompt. Previously the corrective
+//      prompt contained ONLY the defective draft + a list of error
+//      *descriptions*, with no access to the real source data needed to
+//      fix them -- which is why corrective retries tended to guess/
+//      fabricate values (e.g. inventing ITEM1003/NETWR=40.00 to satisfy
+//      "POSEX=1 must exist") instead of recovering the real ones.
+//      The old 2-arg overload is kept but deprecated so any other caller
+//      doesn't silently keep using the ground-truth-blind version.
+
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.xml.parsers.DocumentBuilder;
@@ -34,22 +47,12 @@ import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
- 
+
 public class IdocXmlValidator {
- 
-    // Matches a leading ```xml / ```XML / ``` fence (with optional trailing
-    // newline) and a trailing ``` fence, each optionally preceded/followed
-    // by whitespace. Handles the common "model wrapped it in markdown"
-    // failure mode that otherwise breaks XML parsing at position 1:1.
+
     private static final Pattern LEADING_FENCE = Pattern.compile("^\\s*```[a-zA-Z]*\\s*\\n?");
     private static final Pattern TRAILING_FENCE = Pattern.compile("\\n?```\\s*$");
- 
-    /**
-     * Strips a leading/trailing markdown code fence (```xml ... ``` or
-     * ``` ... ```) if present. Safe to call on text that has no fence --
-     * it's a no-op in that case. ALWAYS call this before autoFix/validate,
-     * since the DOM parser will fail immediately on a leading backtick.
-     */
+
     public static String stripCodeFences(String text) {
         if (text == null) {
             return null;
@@ -59,41 +62,37 @@ public class IdocXmlValidator {
         result = TRAILING_FENCE.matcher(result).replaceFirst("");
         return result.trim();
     }
- 
+
     // ---------------------------------------------------------------
     // Result type
     // ---------------------------------------------------------------
- 
+
     public static class ValidationResult {
         public final boolean valid;
         public final List<String> errors;
- 
+
         public ValidationResult(boolean valid, List<String> errors) {
             this.valid = valid;
             this.errors = errors;
         }
     }
- 
+
     // ---------------------------------------------------------------
-    // 1. Deterministic auto-fix (regex-based, safe, no LLM needed)
+    // 1. Deterministic auto-fix (unchanged from before)
     // ---------------------------------------------------------------
- 
+
     private static final Pattern IDOC_OPEN_NO_ATTR = Pattern.compile("<IDOC(\\s*)>");
     private static final Pattern EDI_DC40_OPEN = Pattern.compile("<EDI_DC40>(?!\\s*<TABNAM>)");
     private static final Pattern PARTN_TAG = Pattern.compile("<PARTN>([^<]*)</PARTN>");
     private static final Pattern CREDAT_TAG = Pattern.compile("<CREDAT>([^<]*)</CREDAT>");
     private static final Pattern DOCNUM_TAG = Pattern.compile("<DOCNUM>([^<]*)</DOCNUM>");
- 
+
     public static String autoFix(String xml) {
         String fixed = xml;
- 
-        // Fix 1: <IDOC> -> <IDOC BEGIN="1">
+
         fixed = IDOC_OPEN_NO_ATTR.matcher(fixed).replaceAll("<IDOC BEGIN=\"1\">");
- 
-        // Fix 2: insert <TABNAM>EDI_DC40</TABNAM> if missing right after <EDI_DC40>
         fixed = EDI_DC40_OPEN.matcher(fixed).replaceAll("<EDI_DC40><TABNAM>EDI_DC40</TABNAM>");
- 
-        // Fix 3: strip everything from the first colon onward in PARTN values
+
         Matcher partnMatcher = PARTN_TAG.matcher(fixed);
         StringBuilder sb = new StringBuilder();
         while (partnMatcher.find()) {
@@ -104,12 +103,7 @@ public class IdocXmlValidator {
         }
         partnMatcher.appendTail(sb);
         fixed = sb.toString();
- 
-        // Fix 4: zero/century-pad CREDAT if it's 6 digits (YYMMDD -> 20YYMMDD)
-        // NOTE: this only catches the 6-digit case. An 8-digit CREDAT that
-        // was sourced from the WRONG segment (e.g. DTM instead of UNB)
-        // looks structurally valid and can't be caught here -- that's what
-        // the expectedCredat check in validate() below is for.
+
         Matcher credatMatcher = CREDAT_TAG.matcher(fixed);
         sb = new StringBuilder();
         while (credatMatcher.find()) {
@@ -122,11 +116,7 @@ public class IdocXmlValidator {
         }
         credatMatcher.appendTail(sb);
         fixed = sb.toString();
- 
-        // Fix 5: if DOCNUM is present but not purely numeric, strip it out
-        // entirely rather than leave a fabricated value in place. We do NOT
-        // invent a replacement here -- that's not something code can do
-        // safely without the real UNZ reference number.
+
         Matcher docnumMatcher = DOCNUM_TAG.matcher(fixed);
         sb = new StringBuilder();
         while (docnumMatcher.find()) {
@@ -137,71 +127,49 @@ public class IdocXmlValidator {
                         : value;
                 docnumMatcher.appendReplacement(sb, Matcher.quoteReplacement("<DOCNUM>" + padded + "</DOCNUM>"));
             } else {
-                // non-numeric -> drop the tag, don't fabricate a number
                 docnumMatcher.appendReplacement(sb, "");
             }
         }
         docnumMatcher.appendTail(sb);
         fixed = sb.toString();
- 
+
         return fixed;
     }
- 
+
     // ---------------------------------------------------------------
-    // 2. Structural + semantic validation (DOM-based; requires re-prompt
-    //    to fix)
+    // 2. Structural + semantic validation
     // ---------------------------------------------------------------
- 
-    /**
-     * Backward-compatible overload: no regression check, no CREDAT/PARVW
-     * ground-truth check. Prefer the 4-arg version below whenever you have
-     * the source segment data available.
-     */
+
     public static ValidationResult validate(String xml) {
-        return validate(xml, null, null, null);
+        return validate(xml, null, null, null, null);
     }
- 
-    /**
-     * Backward-compatible overload: regression check only, no CREDAT/PARVW
-     * ground-truth check.
-     */
+
     public static ValidationResult validate(String xml, String previousIdocXml) {
-        return validate(xml, previousIdocXml, null, null);
+        return validate(xml, previousIdocXml, null, null, null);
     }
- 
-    /**
-     * @param previousIdocXml    the IDoc XML BEFORE this batch's LLM call, or
-     *                           null/blank if this is the very first batch.
-     *                           Used to catch the model silently deleting
-     *                           previously-built data (e.g. wiping out all
-     *                           E1EDP01 line items on a batch that only
-     *                           contained UNT/UNZ) -- a real failure mode
-     *                           that plain structural checks don't catch,
-     *                           since the resulting XML is still well-formed.
-     * @param expectedCredat     the 8-digit CREDAT value derived directly
-     *                           from the UNB segment's date field (century-
-     *                           expanded), or null to skip this check. Every
-     *                           CREDAT found in the output must equal this
-     *                           exactly -- catches the model sourcing the
-     *                           date from DTM (or elsewhere) instead of UNB,
-     *                           which produces a structurally valid but
-     *                           semantically wrong 8-digit value that
-     *                           autoFix's regex can't distinguish from a
-     *                           correct one.
-     * @param expectedParvwCodes qualifier codes extracted verbatim from
-     *                           every NAD segment seen so far (across all
-     *                           batches, in order), or null to skip this
-     *                           check. Each one must appear as a PARVW
-     *                           value somewhere in the output -- catches
-     *                           the model "translating" a qualifier (e.g.
-     *                           NAD "SE" -> PARVW "SU") instead of copying
-     *                           it through unchanged.
-     */
+
+    /** Backward-compatible 4-arg overload -- no expectedPosexCodes check. */
     public static ValidationResult validate(String xml, String previousIdocXml,
                                              String expectedCredat,
                                              List<String> expectedParvwCodes) {
+        return validate(xml, previousIdocXml, expectedCredat, expectedParvwCodes, null);
+    }
+
+    /**
+     * @param expectedPosexCodes literal LIN line-numbers seen so far
+     *                           (across all batches, in order), used the
+     *                           same way expectedParvwCodes is used for
+     *                           PARVW: to flag any POSEX in the output that
+     *                           doesn't correspond to a real source LIN
+     *                           line number. Pass null/empty to skip this
+     *                           check (e.g. if the caller doesn't track it).
+     */
+    public static ValidationResult validate(String xml, String previousIdocXml,
+                                             String expectedCredat,
+                                             List<String> expectedParvwCodes,
+                                             List<String> expectedPosexCodes) {
         List<String> errors = new ArrayList<>();
- 
+
         Document doc;
         try {
             DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
@@ -212,8 +180,7 @@ public class IdocXmlValidator {
             errors.add("XML is not well-formed / failed to parse: " + e.getMessage());
             return new ValidationResult(false, errors);
         }
- 
-        // IDOC BEGIN attribute
+
         NodeList idocNodes = doc.getElementsByTagName("IDOC");
         if (idocNodes.getLength() == 0) {
             errors.add("Missing <IDOC> element entirely.");
@@ -223,14 +190,12 @@ public class IdocXmlValidator {
                 errors.add("<IDOC> is missing the required BEGIN=\"1\" attribute.");
             }
         }
- 
-        // TABNAM
+
         NodeList tabnamNodes = doc.getElementsByTagName("TABNAM");
         if (tabnamNodes.getLength() == 0) {
             errors.add("Missing <TABNAM>EDI_DC40</TABNAM> inside <EDI_DC40>.");
         }
- 
-        // CREDAT length (should be 8 digits, YYYYMMDD)
+
         NodeList credatNodes = doc.getElementsByTagName("CREDAT");
         for (int i = 0; i < credatNodes.getLength(); i++) {
             String value = credatNodes.item(i).getTextContent().trim();
@@ -239,12 +204,7 @@ public class IdocXmlValidator {
                         + "(EDI_DC40/CREDAT must be century-expanded, e.g. \"20\" + YYMMDD).");
             }
         }
- 
-        // FIX #1: CREDAT must match the UNB interchange date specifically,
-        // not just "some" 8-digit date. This catches the case where the
-        // model sourced CREDAT from DTM (or another date-bearing segment)
-        // instead of UNB -- structurally valid, semantically wrong, and
-        // NOT caught by the format check above.
+
         if (expectedCredat != null && !expectedCredat.isBlank()) {
             for (int i = 0; i < credatNodes.getLength(); i++) {
                 String value = credatNodes.item(i).getTextContent().trim();
@@ -256,8 +216,7 @@ public class IdocXmlValidator {
                 }
             }
         }
- 
-        // PARTN should never contain a colon
+
         NodeList partnNodes = doc.getElementsByTagName("PARTN");
         for (int i = 0; i < partnNodes.getLength(); i++) {
             String value = partnNodes.item(i).getTextContent();
@@ -266,18 +225,14 @@ public class IdocXmlValidator {
                         + "everything from the first colon onward must be stripped.");
             }
         }
- 
-        // FIX #2: every NAD-derived qualifier we've seen so far must appear
-        // verbatim as a PARVW value somewhere in the output. Catches the
-        // model "translating" a qualifier (e.g. "SE" -> "SU") instead of
-        // copying it through unchanged -- a silent semantic substitution
-        // that produces well-formed, plausible-looking output.
+
+        // Every expected NAD-derived qualifier must appear verbatim.
+        List<String> actualParvwValues = new ArrayList<>();
+        NodeList parvwNodes = doc.getElementsByTagName("PARVW");
+        for (int i = 0; i < parvwNodes.getLength(); i++) {
+            actualParvwValues.add(parvwNodes.item(i).getTextContent().trim());
+        }
         if (expectedParvwCodes != null && !expectedParvwCodes.isEmpty()) {
-            NodeList parvwNodes = doc.getElementsByTagName("PARVW");
-            List<String> actualParvwValues = new ArrayList<>();
-            for (int i = 0; i < parvwNodes.getLength(); i++) {
-                actualParvwValues.add(parvwNodes.item(i).getTextContent().trim());
-            }
             for (String qualifier : expectedParvwCodes) {
                 if (!actualParvwValues.contains(qualifier)) {
                     errors.add("Expected PARVW=\"" + qualifier + "\" (copied verbatim from the "
@@ -286,9 +241,40 @@ public class IdocXmlValidator {
                             + "copied through as-is.");
                 }
             }
+
+            // FIX (new): the inverse check. Anything in the output NOT in
+            // the expected set has no traceable source NAD segment at all
+            // -- this is how a fabricated E1EDKA1 (e.g. PARVW="SU" invented
+            // during a corrective retry that had no real NAD to copy from)
+            // slips through undetected by the "missing expected value"
+            // check above, since that check only ever looks for absence,
+            // never for extras.
+            for (String actual : actualParvwValues) {
+                if (!expectedParvwCodes.contains(actual)) {
+                    errors.add("PARVW=\"" + actual + "\" appears in the output but does not "
+                            + "correspond to any real source NAD segment qualifier seen so far "
+                            + "(" + expectedParvwCodes + "). This party appears to be fabricated "
+                            + "-- remove it unless it is genuinely backed by a NAD segment in "
+                            + "the current batch.");
+                }
+            }
         }
- 
-        // DOCNUM must be numeric and 14 digits if present and non-empty
+
+        // Same idea for POSEX: every value must trace back to a real LIN
+        // line number seen so far; anything else is fabricated.
+        if (expectedPosexCodes != null && !expectedPosexCodes.isEmpty()) {
+            NodeList lineItemsForPosexCheck = doc.getElementsByTagName("E1EDP01");
+            for (int i = 0; i < lineItemsForPosexCheck.getLength(); i++) {
+                String posex = firstChildText((Element) lineItemsForPosexCheck.item(i), "POSEX");
+                if (!expectedPosexCodes.contains(posex)) {
+                    errors.add("POSEX=\"" + posex + "\" appears in the output but does not "
+                            + "correspond to any real source LIN line number seen so far "
+                            + "(" + expectedPosexCodes + "). This line item appears to be "
+                            + "fabricated.");
+                }
+            }
+        }
+
         NodeList docnumNodes = doc.getElementsByTagName("DOCNUM");
         for (int i = 0; i < docnumNodes.getLength(); i++) {
             String value = docnumNodes.item(i).getTextContent().trim();
@@ -297,8 +283,7 @@ public class IdocXmlValidator {
                         + "DOCNUM must only be set from a real UNZ reference, never invented.");
             }
         }
- 
-        // Every E1EDP01 must contain at least one E1EDP19 child
+
         NodeList lineItems = doc.getElementsByTagName("E1EDP01");
         for (int i = 0; i < lineItems.getLength(); i++) {
             Element lineItem = (Element) lineItems.item(i);
@@ -309,13 +294,7 @@ public class IdocXmlValidator {
                         + "(item code) -- the LIN item code was dropped.");
             }
         }
- 
-        // Heuristic-only check for fix #3: flag (don't hard-fail on) two
-        // different line items sharing identical MENGE+NETWR, since that's
-        // the signature of the cross-item QTY/PRI bleed-over bug -- but two
-        // items COULD legitimately have the same quantity/price by
-        // coincidence, so this is a warning, not an error, and doesn't
-        // block the merge.
+
         Map<String, List<String>> mengeNetwrToPosex = new HashMap<>();
         for (int i = 0; i < lineItems.getLength(); i++) {
             Element lineItem = (Element) lineItems.item(i);
@@ -330,8 +309,7 @@ public class IdocXmlValidator {
                         + "both mapped from the same QTY/PRI segment by mistake.");
             }
         });
- 
-        // No leftover EDI-source tag names anywhere in the output
+
         String[] forbiddenTags = {"UNB", "UNH", "UNT", "UNZ", "NAD", "DTM", "LIN",
                 "PIA", "IMD", "QTY", "PRI", "CUX", "BGM", "SENDERID", "RECEIVERID",
                 "segment", "field"};
@@ -341,27 +319,36 @@ public class IdocXmlValidator {
                         + "it must be translated into the corresponding IDoc field, never emitted as-is.");
             }
         }
- 
-        // No-regression check: nothing that existed in the previous IDoc
-        // should silently disappear. This is what would have caught the
-        // batch-4-wipes-out-all-line-items failure.
+
+        // No-regression checks -- BOTH key-presence AND content.
         if (previousIdocXml != null && !previousIdocXml.isBlank()) {
             try {
                 Document prevDoc = parseQuietly(previousIdocXml);
                 if (prevDoc != null) {
                     checkNoRegression(prevDoc, doc, "E1EDP01", "POSEX", errors);
                     checkNoRegression(prevDoc, doc, "E1EDKA1", "PARVW", errors);
+
+                    // FIX (new): content-level diff, not just key presence.
+                    // Catches e.g. POSEX="1" still existing but its
+                    // MENGE/E1EDP19/E1EDP20/E1EDPT1 content having been
+                    // silently swapped out for fabricated values.
+                    checkNoRegressionContent(prevDoc, doc, "E1EDP01", "POSEX",
+                            new String[] {"MENGE", "MENEE"},
+                            new String[] {"E1EDP19", "E1EDP20", "E1EDPT1"},
+                            errors);
+                    checkNoRegressionContent(prevDoc, doc, "E1EDKA1", "PARVW",
+                            new String[] {"PARTN"},
+                            new String[] {},
+                            errors);
                 }
             } catch (Exception e) {
-                // Previous IDoc itself didn't parse (shouldn't happen since
-                // it would have failed validation when it was produced) --
-                // don't block on this, just skip the regression check.
+                // previous IDoc itself didn't parse -- skip, don't block
             }
         }
- 
+
         return new ValidationResult(errors.isEmpty(), errors);
     }
- 
+
     private static Document parseQuietly(String xml) {
         try {
             DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
@@ -371,19 +358,13 @@ public class IdocXmlValidator {
             return null;
         }
     }
- 
-    /**
-     * Confirms every distinct value of {@code keyTagName} (e.g. POSEX for
-     * E1EDP01, PARVW for E1EDKA1) found under {@code elementTagName} in
-     * {@code prevDoc} is still present somewhere under the same tag in
-     * {@code newDoc}. Flags each one that vanished.
-     */
+
     private static void checkNoRegression(Document prevDoc, Document newDoc,
                                            String elementTagName, String keyTagName,
                                            List<String> errors) {
         List<String> prevKeys = collectKeys(prevDoc, elementTagName, keyTagName);
         List<String> newKeys = collectKeys(newDoc, elementTagName, keyTagName);
- 
+
         for (String key : prevKeys) {
             if (!newKeys.contains(key)) {
                 errors.add("REGRESSION: <" + elementTagName + "> with " + keyTagName + "=\"" + key
@@ -393,7 +374,113 @@ public class IdocXmlValidator {
             }
         }
     }
- 
+
+    /**
+     * Content-aware companion to checkNoRegression: for every element in
+     * prevDoc matched to an element in newDoc by the same key value, this
+     * verifies:
+     *   (a) each of {@code strictScalarChildTags} is UNCHANGED (exact
+     *       string match) -- these are non-repeating fields where any
+     *       difference means the content was mutated, not extended.
+     *   (b) each instance of each of {@code repeatingChildGroupTags} that
+     *       existed in prevDoc's element is still present as an
+     *       equivalent instance (by full serialized text) somewhere among
+     *       newDoc's matching element's children of that tag -- this
+     *       allows legitimate ADDITION of new instances (e.g. a later
+     *       batch's PIA adding a second E1EDP19) without allowing removal
+     *       or replacement of the ones that were already there.
+     */
+    private static void checkNoRegressionContent(Document prevDoc, Document newDoc,
+                                                  String elementTagName, String keyTagName,
+                                                  String[] strictScalarChildTags,
+                                                  String[] repeatingChildGroupTags,
+                                                  List<String> errors) {
+        Map<String, Element> prevByKey = mapByKey(prevDoc, elementTagName, keyTagName);
+        Map<String, Element> newByKey = mapByKey(newDoc, elementTagName, keyTagName);
+
+        for (Map.Entry<String, Element> entry : prevByKey.entrySet()) {
+            String key = entry.getKey();
+            Element prevEl = entry.getValue();
+            Element newEl = newByKey.get(key);
+            if (newEl == null) {
+                continue; // already reported by checkNoRegression
+            }
+
+            for (String scalarTag : strictScalarChildTags) {
+                String prevValue = firstChildText(prevEl, scalarTag);
+                String newValue = firstChildText(newEl, scalarTag);
+                if (!prevValue.equals(newValue)) {
+                    errors.add("REGRESSION (content changed): <" + elementTagName + "> with "
+                            + keyTagName + "=\"" + key + "\" had " + scalarTag + "=\"" + prevValue
+                            + "\" in the previous IDoc but now has " + scalarTag + "=\"" + newValue
+                            + "\". Never overwrite an existing " + elementTagName
+                            + "'s values -- only append NEW sibling/child elements to it.");
+                }
+            }
+
+            for (String groupTag : repeatingChildGroupTags) {
+                Set<String> prevInstances = serializedChildInstances(prevEl, groupTag);
+                Set<String> newInstances = serializedChildInstances(newEl, groupTag);
+                for (String prevInstance : prevInstances) {
+                    if (!newInstances.contains(prevInstance)) {
+                        errors.add("REGRESSION (content changed): <" + elementTagName + "> with "
+                                + keyTagName + "=\"" + key + "\" previously had a <" + groupTag
+                                + "> [" + prevInstance + "] that is now missing or altered. "
+                                + "Never remove or overwrite an existing " + groupTag
+                                + " -- only add new ones alongside it.");
+                    }
+                }
+            }
+        }
+    }
+
+    private static Map<String, Element> mapByKey(Document doc, String elementTagName, String keyTagName) {
+        Map<String, Element> map = new java.util.LinkedHashMap<>();
+        NodeList elements = doc.getElementsByTagName(elementTagName);
+        for (int i = 0; i < elements.getLength(); i++) {
+            Element el = (Element) elements.item(i);
+            String key = firstChildText(el, keyTagName);
+            // First occurrence wins if duplicate keys exist (shouldn't happen
+            // in a well-behaved IDoc, but don't let it crash validation).
+            map.putIfAbsent(key, el);
+        }
+        return map;
+    }
+
+    /**
+     * Serializes each direct child of {@code parent} named {@code childTag}
+     * into a stable "tag=value|tag=value" string (sorted by tag name) so
+     * two structurally-equivalent instances compare equal regardless of
+     * child element ordering.
+     */
+    private static Set<String> serializedChildInstances(Element parent, String childTag) {
+        Set<String> result = new LinkedHashSet<>();
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node node = children.item(i);
+            if (node.getNodeType() == Node.ELEMENT_NODE && childTag.equals(node.getNodeName())) {
+                Element childEl = (Element) node;
+                Map<String, String> fields = new HashMap<>();
+                NodeList grandchildren = childEl.getChildNodes();
+                for (int j = 0; j < grandchildren.getLength(); j++) {
+                    Node gc = grandchildren.item(j);
+                    if (gc.getNodeType() == Node.ELEMENT_NODE) {
+                        fields.put(gc.getNodeName(), gc.getTextContent().trim());
+                    }
+                }
+                List<String> keys = new ArrayList<>(fields.keySet());
+                keys.sort(String::compareTo);
+                StringBuilder sb = new StringBuilder();
+                for (String k : keys) {
+                    if (sb.length() > 0) sb.append("|");
+                    sb.append(k).append("=").append(fields.get(k));
+                }
+                result.add(sb.toString());
+            }
+        }
+        return result;
+    }
+
     private static List<String> collectKeys(Document doc, String elementTagName, String keyTagName) {
         List<String> keys = new ArrayList<>();
         NodeList elements = doc.getElementsByTagName(elementTagName);
@@ -403,8 +490,7 @@ public class IdocXmlValidator {
         }
         return keys;
     }
- 
- 
+
     private static String firstChildText(Element parent, String tagName) {
         NodeList children = parent.getElementsByTagName(tagName);
         if (children.getLength() == 0) {
@@ -413,29 +499,75 @@ public class IdocXmlValidator {
         Node node = children.item(0);
         return node.getTextContent();
     }
- 
+
     // ---------------------------------------------------------------
     // 3. Build a corrective re-prompt from validation errors
     // ---------------------------------------------------------------
- 
+
+    /**
+     * @deprecated Ground-truth-blind version kept only for source
+     * compatibility. This is the version that caused the fabrication bugs
+     * (ITEM1003, PARVW="SU") because a retry built from this had no real
+     * source segments or prior IDoc snapshot to recover correct values
+     * from -- only the defective draft and a description of what's wrong.
+     * Use the 4-arg overload below in all new call sites.
+     */
+    @Deprecated
     public static String buildCorrectivePrompt(String previousResponseXml, List<String> errors) {
+        return buildCorrectivePrompt(previousResponseXml, errors, null, null);
+    }
+
+    /**
+     * @param previousResponseXml the defective draft to fix
+     * @param errors               validation errors to fix
+     * @param idocBeforeBatch      the IDoc snapshot as it existed BEFORE
+     *                             this batch's original call -- the source
+     *                             of truth for any "REGRESSION" /
+     *                             "fabricated" error, so the model can
+     *                             recover the real previous values instead
+     *                             of inventing plausible-looking ones.
+     * @param rawBatchSegmentsText the ORIGINAL EDI segments for this batch,
+     *                             verbatim (e.g. re-join each
+     *                             EdiSegment.getRawXml() the same way the
+     *                             initial prompt did) -- the source of
+     *                             truth for any "missing PARVW/POSEX" or
+     *                             "dropped item code" error.
+     */
+    public static String buildCorrectivePrompt(String previousResponseXml, List<String> errors,
+                                                String idocBeforeBatch, String rawBatchSegmentsText) {
         StringBuilder sb = new StringBuilder();
         sb.append("Your previous response has the following specific defects. ")
           .append("Return the FULL corrected IDoc XML (same rules as before: ")
           .append("no explanation, no markdown, well-formed, full envelope). ")
           .append("Fix ONLY what is listed below; do not change anything else ")
-          .append("that was already correct.\n\n");
- 
+          .append("that was already correct. Every value you use to fix these ")
+          .append("defects MUST come from the ORIGINAL SOURCE SEGMENTS and/or ")
+          .append("PREVIOUSLY-CONFIRMED IDOC sections below -- never invent, ")
+          .append("guess, or reuse a value from an unrelated line item just to ")
+          .append("satisfy an existence check.\n\n");
+
         sb.append("DEFECTS TO FIX:\n");
         int i = 1;
         for (String error : errors) {
             sb.append(i++).append(". ").append(error).append("\n");
         }
- 
+
+        if (idocBeforeBatch != null && !idocBeforeBatch.isBlank()) {
+            sb.append("\nPREVIOUSLY-CONFIRMED IDOC (ground truth for anything flagged as ")
+              .append("REGRESSION or fabricated -- copy exact prior values from here, do not ")
+              .append("recreate them from memory):\n");
+            sb.append(idocBeforeBatch).append("\n");
+        }
+
+        if (rawBatchSegmentsText != null && !rawBatchSegmentsText.isBlank()) {
+            sb.append("\nORIGINAL SOURCE SEGMENTS FOR THIS BATCH (ground truth for anything ")
+              .append("flagged as missing/incorrect PARVW, POSEX, item code, price, or quantity):\n");
+            sb.append(rawBatchSegmentsText).append("\n");
+        }
+
         sb.append("\nPREVIOUS (DEFECTIVE) RESPONSE:\n");
         sb.append(previousResponseXml).append("\n");
- 
+
         return sb.toString();
     }
 }
- 

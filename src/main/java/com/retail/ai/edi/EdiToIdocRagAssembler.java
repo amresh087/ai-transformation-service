@@ -1,5 +1,24 @@
 package com.retail.ai.edi;
 
+// NOTE: adjust package/imports to match your actual project structure.
+//
+// CHANGES IN THIS VERSION:
+//
+//   1. NEW: expectedPosexCodesForBatch, built the same way
+//      expectedParvwCodesForBatch already was (seed from what's already in
+//      idocBeforeBatch, plus any NEW LIN line numbers this batch
+//      introduces). Passed into the 5-arg IdocXmlValidator.validate(...)
+//      overload so fabricated POSEX values (with no real source LIN) get
+//      caught the same way fabricated PARVW values now do.
+//
+//   2. buildCorrectivePrompt(...) calls now pass idocBeforeBatch and this
+//      batch's raw segment text, so a corrective retry has the real
+//      ground truth available instead of only the defective draft and a
+//      list of error descriptions -- this is what was silently causing
+//      retries to fabricate plausible-looking values (e.g. inventing
+//      ITEM1003/NETWR=40.00 just to satisfy "POSEX=1 must exist", or
+//      PARVW="SU" with no source NAD) instead of recovering the real data.
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -26,33 +45,11 @@ public class EdiToIdocRagAssembler {
         this.completionService = completionService;
     }
 
-    // Tune this. Larger batches = fewer LLM calls but bigger prompts and
-    // more chance the model loses track of correlation across many
-    // LIN/PIA/IMD/QTY/PRI segments in one shot. 3-5 is a reasonable start.
     private static final int BATCH_SIZE = 5;
-
-    // Delay between batches (not between every single segment anymore).
-    // Set to 0 if your completionService has no rate limit concerns.
     private static final long DELAY_BETWEEN_BATCHES_MS = 2_000;
-
-    // How many corrective re-prompts to allow per batch attempt before
-    // giving up on THAT attempt (autoFix/validate retry loop within a
-    // single batch call).
     private static final int MAX_CORRECTION_ATTEMPTS = 2;
-
-    // How many times a discarded batch's segments may be REQUEUED as a
-    // fresh, isolated batch of their own before being permanently dropped.
-    // This is what prevents data loss when a batch fails validation and
-    // gets discarded -- instead of losing those segments forever, they get
-    // one (or more) more isolated shot(s), separate from whatever batch
-    // they originally arrived in.
     private static final int MAX_REQUEUE_ATTEMPTS = 1;
 
-    /**
-     * Small wrapper so we can track how many times a given group of
-     * segments has already been requeued after a discard, and stop
-     * retrying indefinitely.
-     */
     private static class BatchUnit {
         final List<EdiSegment> segments;
         final int requeueCount;
@@ -70,12 +67,8 @@ public class EdiToIdocRagAssembler {
 
         EdiXmlParser parser = new EdiXmlParser();
         List<EdiSegment> segments = parser.parse(ediXml);
-        // Ground-truth CREDAT, captured once from the raw segment stream
-        // before any LLM involvement, so validate() can check the LLM's
-        // output against it instead of trusting its judgment.
         String expectedCredat = extractExpectedCredat(segments);
 
-        // Initial empty IDOC
         String currentIdocXml = """
                 <ORDERS05>
                     <IDOC BEGIN="1">
@@ -83,16 +76,8 @@ public class EdiToIdocRagAssembler {
                 </ORDERS05>
                 """;
 
-        // FIX #3a: batch by item group (cut before each new LIN) instead of
-        // blind fixed-size chunking, so QTY/PRI segments belonging to one
-        // LIN item never get split across a batch boundary from a
-        // different item's LIN/QTY/PRI segments.
         List<List<EdiSegment>> initialBatches = partitionByItemGroup(segments, BATCH_SIZE);
 
-        // FIX (data loss): use a work queue instead of a plain for-each, so
-        // a discarded batch's segments can be pushed back onto the front of
-        // the queue and retried as their own isolated batch, instead of
-        // being silently dropped forever.
         Deque<BatchUnit> workQueue = new ArrayDeque<>();
         for (List<EdiSegment> b : initialBatches) {
             workQueue.add(new BatchUnit(b, 0));
@@ -111,15 +96,10 @@ public class EdiToIdocRagAssembler {
                     batch.size()));
 
             for (EdiSegment segment : batch) {
-                System.out.println(String.format("----> Segment Name : %s", segment.getName()));
-                System.out.println(String.format("-----> Segment XML :%n%s", segment.getRawXml()));
+                System.out.println(String.format("----> Segment Name : %s", segment.getName()));     
             }
 
             long retrievalStart = System.currentTimeMillis();
-            // Fetch mapping chunks for every segment in the batch, then
-            // de-dupe by chunk text so the same reference doesn't get
-            // repeated in the prompt if multiple segments in the batch
-            // hit the same chunk.
             LinkedHashMap<String, MappingChunk> chunkMap = new LinkedHashMap<>();
             for (EdiSegment segment : batch) {
                 List<MappingChunk> chunksForSegment = mappingChunkProvider.fetchMappingChunk(
@@ -143,12 +123,17 @@ public class EdiToIdocRagAssembler {
                 batchNo++;
                 continue;
             }
-            // Snapshot BEFORE this batch's call, so validate() can detect
-            // if the LLM silently deletes previously-built content, and so
-            // we have something safe to revert to if this batch fails.
+
             String idocBeforeBatch = currentIdocXml;
-            
+
             List<String> expectedParvwCodesForBatch = extractParvwValues(idocBeforeBatch);
+            // FIX (new): the same kind of "known-good set so far" tracking
+            // that already existed for PARVW, now added for POSEX. Seeded
+            // from whatever POSEX values are already successfully merged,
+            // plus any NEW literal LIN line numbers this batch introduces.
+            // Anything the LLM outputs outside this set has no traceable
+            // source LIN and is treated as fabricated.
+            List<String> expectedPosexCodesForBatch = extractPosexValues(idocBeforeBatch);
             for (EdiSegment segment : batch) {
                 if ("NAD".equals(segment.getName())) {
                     String qualifier = extractFirstFieldQualifier(segment.getRawXml());
@@ -156,8 +141,20 @@ public class EdiToIdocRagAssembler {
                         expectedParvwCodesForBatch.add(qualifier);
                     }
                 }
+                if ("LIN".equals(segment.getName())) {
+                    for (String lineNumber : extractLinLineNumbers(segment.getRawXml())) {
+                        if (!expectedPosexCodesForBatch.contains(lineNumber)) {
+                            expectedPosexCodesForBatch.add(lineNumber);
+                        }
+                    }
+                }
             }
-            // Build prompt with previous IDOC + ALL segments in this batch
+
+            // Raw source text for this batch, in the SAME shape the initial
+            // prompt shows it in, so a corrective retry can be handed this
+            // verbatim instead of losing it after the first call.
+            String rawBatchSegmentsText = buildRawBatchSegmentsText(batch);
+
             String prompt = PromptHelper.buildPromptIDocMappingBatch(
                     batch,
                     mappingChunks,
@@ -165,24 +162,14 @@ public class EdiToIdocRagAssembler {
 
             String completionText = callLlmForBatch(prompt, batchNo);
             if (completionText == null) {
-                // empty / unmapped -- callLlmForBatch already logged why
                 batchNo++;
                 continue;
             }
-            // Deterministic, safe fixes first (no LLM involvement, can't
-            // get these wrong): BEGIN attr, TABNAM, PARTN colon-strip,
-            // CREDAT century-expand, non-numeric DOCNUM removal.
+
             completionText = IdocXmlValidator.autoFix(completionText);
-            // Structural + semantic checks that DO require judgment to fix
-            // (dropped E1EDP19 code, deleted prior content, wrong-source
-            // CREDAT, reinterpreted PARVW) get a bounded number of
-            // corrective re-prompts.
             IdocXmlValidator.ValidationResult validation = IdocXmlValidator.validate(completionText, idocBeforeBatch,
-                    expectedCredat, expectedParvwCodesForBatch);
-            // DIAGNOSTIC: log unconditionally (not just on failure) so we
-            // can confirm validate() is actually being called with the
-            // real idocBeforeBatch and actually returning what we expect,
-            // rather than assuming it. Remove once confirmed stable.
+                    expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch);
+
             System.out.println("---->Batch " + batchNo + " validation.valid=" + validation.valid
                     + ", errors=" + validation.errors.size());
             System.out.println("---->idocBeforeBatch E1EDP01 POSEX values: "
@@ -190,6 +177,7 @@ public class EdiToIdocRagAssembler {
             System.out.println("---->completionText E1EDP01 POSEX values: "
                     + extractPosexValues(completionText));
             System.out.println("---->expectedParvwCodesForBatch: " + expectedParvwCodesForBatch);
+            System.out.println("---->expectedPosexCodesForBatch: " + expectedPosexCodesForBatch);
 
             int attempt = 0;
             while (!validation.valid && attempt < MAX_CORRECTION_ATTEMPTS) {
@@ -198,30 +186,27 @@ public class EdiToIdocRagAssembler {
                         + attempt + "/" + MAX_CORRECTION_ATTEMPTS + "):");
                 validation.errors.forEach(e -> System.err.println("       - " + e));
 
-                String correctivePrompt = IdocXmlValidator.buildCorrectivePrompt(completionText, validation.errors);
+                // FIX (new): pass idocBeforeBatch + rawBatchSegmentsText so
+                // the retry has real ground truth to recover values from,
+                // instead of only the defective draft + error descriptions.
+                String correctivePrompt = IdocXmlValidator.buildCorrectivePrompt(
+                        completionText, validation.errors, idocBeforeBatch, rawBatchSegmentsText);
 
                 String corrected = callLlmForBatch(correctivePrompt, batchNo);
                 if (corrected == null) {
-                    break; // empty/unmapped correction response -- stop retrying, keep last good text
+                    break;
                 }
 
                 corrected = IdocXmlValidator.autoFix(corrected);
                 validation = IdocXmlValidator.validate(corrected, idocBeforeBatch,
-                        expectedCredat, expectedParvwCodesForBatch);
+                        expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch);
                 completionText = corrected;
 
-                // DIAGNOSTIC: same unconditional log, for each retry.
                 System.out.println("---->Batch " + batchNo + " retry " + attempt+ " validation.valid=" + validation.valid+ ", errors=" + validation.errors.size());
                 System.out.println("---->idocBeforeBatch E1EDP01 POSEX values: "+ extractPosexValues(idocBeforeBatch));
                 System.out.println("---->corrected E1EDP01 POSEX values: "+ extractPosexValues(completionText));
             }
             if (!validation.valid) {
-                // FIX (data loss): instead of silently dropping this
-                // batch's segments forever, requeue them as their own
-                // isolated batch (up to MAX_REQUEUE_ATTEMPTS times) so
-                // they get another chance -- now separated from whatever
-                // else was originally batched alongside them, which often
-                // is itself enough to let the LLM succeed on the retry.
                 if (unit.requeueCount < MAX_REQUEUE_ATTEMPTS) {
                     System.err.println("----> Batch " + batchNo + " still has unresolved issues after "
                             + MAX_CORRECTION_ATTEMPTS + " correction attempts. REQUEUEING its "
@@ -232,10 +217,6 @@ public class EdiToIdocRagAssembler {
                     workQueue.addFirst(new BatchUnit(batch, unit.requeueCount + 1));
                     currentIdocXml = idocBeforeBatch;
                 } else {
-                    // Exhausted requeue attempts too -- this is now a real,
-                    // permanent loss of this segment data from the final
-                    // IDoc. Log it LOUDLY (not just to the same stream as
-                    // routine validation retries) so it's not missed.
                     System.err.println("----> Batch " + batchNo + " PERMANENTLY DROPPED after "
                             + MAX_CORRECTION_ATTEMPTS + " correction attempts and "
                             + MAX_REQUEUE_ATTEMPTS + " requeue attempt(s). The following "
@@ -262,12 +243,33 @@ public class EdiToIdocRagAssembler {
                 continue;
             }
 
-            // Update current IDOC
             currentIdocXml = completionText;
             System.out.println("*******************************************");
+            System.out.println("--lengt---"+currentIdocXml.length());
             System.out.println(currentIdocXml);
             System.out.println("*******************************************");
             System.err.println("--->Batch " + batchNo + " successfully merged into IDOC.");
+
+            // FIX (new): non-blocking diagnostic -- validation guarantees the
+            // merge never SHRINKS or MUTATES prior content, but it doesn't by
+            // itself prove this batch's own segments actually landed
+            // anywhere. If this batch contained content-bearing segments
+            // (NAD/LIN/PIA/IMD/QTY/PRI/CUX) but the total element count did
+            // not increase, that's worth a loud log line rather than silent
+            // assumption of success.
+            boolean batchHadContentSegments = batch.stream().anyMatch(s ->
+                    List.of("NAD", "LIN", "PIA", "IMD", "QTY", "PRI", "CUX").contains(s.getName()));
+            int beforeCount = countElements(idocBeforeBatch);
+            int afterCount = countElements(currentIdocXml);
+            if (batchHadContentSegments && afterCount <= beforeCount) {
+                System.err.println("----> WARNING: Batch " + batchNo + " passed validation but the "
+                        + "merged IDoc's element count did not increase (" + beforeCount + " -> "
+                        + afterCount + ") despite containing content-bearing segments. Verify this "
+                        + "batch's data actually landed in the output.");
+            } else {
+                System.out.println("---->Batch " + batchNo + " element count: " + beforeCount
+                        + " -> " + afterCount);
+            }
 
             if (DELAY_BETWEEN_BATCHES_MS > 0) {
                 try {
@@ -288,29 +290,15 @@ public class EdiToIdocRagAssembler {
         System.err.println("---------> Final IDOC : ");
         System.err.println(currentIdocXml);
 
-        // TODO: Parse currentIdocXml into your AssemblyResult
         return null;
     }
 
-    /**
-     * Calls the LLM with the given prompt and returns the trimmed response
-     * text, or null if the response was blank or "&lt;unmapped/&gt;" (in
-     * which case the caller should skip/stop, and this method already
-     * logs why).
-     */
     private String callLlmForBatch(String prompt, int batchNo) {
         CompletionRequest request = new CompletionRequest();
         request.setPrompt(prompt);
 
-        // DIAGNOSTIC: confirm the outgoing prompt actually differs per
-        // batch and actually contains the real segment content, rather
-        // than trusting that it does. Remove once confirmed.
         System.out.println("---->Prompt length for batch " + batchNo + ": " + prompt.length());
         System.out.println("---->Prompt hash for batch " + batchNo + ": " + prompt.hashCode());
-        // NOTE: "CURRENT EDI SEGMENTS" also appears earlier in the prompt
-        // inside the instructional text (in quotes), so indexOf() alone
-        // grabs the wrong occurrence. Search for the actual section header
-        // text instead, which is unique.
         String sectionMarker = "CURRENT EDI SEGMENTS (process ALL of these";
         int segStart = prompt.indexOf(sectionMarker);
         if (segStart >= 0) {
@@ -319,13 +307,11 @@ public class EdiToIdocRagAssembler {
             System.out.println("---->ACTUAL CURRENT EDI SEGMENTS section for batch " + batchNo
                     + ":\n" + prompt.substring(segStart, end));
         } else {
-            // Expected/normal for corrective retry prompts built by
-            // buildCorrectivePrompt() -- those are short and intentionally
-            // don't repeat the full segment-list section. Only worth
-            // investigating if this fires on the FIRST call of a batch
-            // (the long ~20k+ char prompt), not on retries.
             System.out
-                    .println("---->WARNING: real segment-list section header not found in prompt for batch " + batchNo);
+                    .println("---->NOTE: real segment-list section header not found in prompt for batch " + batchNo
+                            + " -- expected for corrective retries, which now embed the source "
+                            + "segments under a different header (\"ORIGINAL SOURCE SEGMENTS FOR "
+                            + "THIS BATCH\") instead of duplicating this exact one.");
         }
 
         System.out.println("---->Calling LLM for batch " + batchNo + "...");
@@ -355,25 +341,11 @@ public class EdiToIdocRagAssembler {
             return null;
         }
 
-        // Model frequently wraps its answer in ```xml ... ``` even though
-        // the prompt says not to. Strip it here, once, so every downstream
-        // consumer (autoFix, validate, merge into currentIdocXml) always
-        // sees raw XML.
         completionText = IdocXmlValidator.stripCodeFences(completionText);
 
         return completionText;
     }
 
-    /**
-     * FIX #3a: Splits a list into consecutive sublists of at most
-     * {@code maxSize} elements, but never splits a LIN item's related
-     * segments (QTY/PRI/etc. following it) across a boundary from a
-     * DIFFERENT item's LIN. A new batch always starts fresh at a LIN
-     * segment boundary once the current batch has content, which prevents
-     * the cross-item QTY/PRI correlation bug (item A's trailing QTY/PRI
-     * getting batched together with item B's LIN/QTY/PRI and the LLM
-     * mis-attributing values between them).
-     */
     private static List<List<EdiSegment>> partitionByItemGroup(List<EdiSegment> list, int maxSize) {
         List<List<EdiSegment>> result = new ArrayList<>();
         List<EdiSegment> current = new ArrayList<>();
@@ -396,22 +368,33 @@ public class EdiToIdocRagAssembler {
     }
 
     /**
-     * DIAGNOSTIC helper: extracts every POSEX value found in a given IDoc
-     * XML string, purely for logging. Returns a bracketed list like
-     * "[1, 2]" or "[]" if none found / xml doesn't parse.
+     * FIX (new): total element count in the given IDoc XML, used purely as
+     * a coarse "did this batch actually add anything" diagnostic alongside
+     * the strict content-level checks in IdocXmlValidator. Returns -1 if
+     * the XML doesn't parse (shouldn't happen for anything that already
+     * passed validation, but this is a diagnostic, not a gate -- never
+     * throw from here).
      */
+    private static int countElements(String xml) {
+        if (xml == null || xml.isBlank()) {
+            return 0;
+        }
+        try {
+            javax.xml.parsers.DocumentBuilderFactory dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            dbf.setNamespaceAware(false);
+            org.w3c.dom.Document doc = dbf.newDocumentBuilder()
+                    .parse(new java.io.ByteArrayInputStream(
+                            xml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            return doc.getElementsByTagName("*").getLength();
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
     private static List<String> extractPosexValues(String xml) {
         return extractChildTextValues(xml, "E1EDP01", "POSEX");
     }
 
-    /**
-     * Extracts every PARVW value currently present in a given IDoc XML
-     * string. Used to seed the per-batch expected-PARVW set with whatever
-     * has ALREADY been successfully merged, so the check only ever
-     * requires (a) what's already there to persist, plus (b) what THIS
-     * batch's own NAD segments introduce -- never qualifiers from batches
-     * that never successfully merged.
-     */
     private static List<String> extractParvwValues(String xml) {
         return extractChildTextValues(xml, "E1EDKA1", "PARVW");
     }
@@ -444,25 +427,12 @@ public class EdiToIdocRagAssembler {
         return result;
     }
 
-    /**
-     * FIX #1: Finds the UNB segment in the full segment list and extracts
-     * its date field (format "YYMMDD:HHMM", e.g. "200722:1500"),
-     * century-expanding it to an 8-digit CREDAT (e.g. "20200722"). Returns
-     * null if no UNB segment is found or its date field doesn't parse,
-     * in which case the CREDAT validation check is simply skipped rather
-     * than failing spuriously.
-     *
-     * NOTE: adjust the field index below (currently assuming the date:time
-     * field is the 4th field, index 3, of UNB based on your sample --
-     * "UNOC:3" / "SENDERID:ZZ" / "RECEIVERID:ZZ" / "200722:1500" / ... --
-     * to match however EdiSegment actually exposes individual fields.
-     */
     private static String extractExpectedCredat(List<EdiSegment> segments) {
         for (EdiSegment seg : segments) {
             if ("UNB".equals(seg.getName())) {
-                List<String> fields = seg.getFields(); // adjust to your real accessor
+                List<String> fields = seg.getFields();
                 if (fields != null && fields.size() > 3) {
-                    String dateTimeField = fields.get(3); // "200722:1500"
+                    String dateTimeField = fields.get(3);
                     int colonIdx = dateTimeField.indexOf(':');
                     String datePart = colonIdx >= 0 ? dateTimeField.substring(0, colonIdx) : dateTimeField;
                     if (datePart.matches("\\d{6}")) {
@@ -475,14 +445,6 @@ public class EdiToIdocRagAssembler {
         return null;
     }
 
-    /**
-     * FIX #2: Extracts the qualifier code from a NAD segment's raw XML
-     * (the first &lt;field&gt;, e.g. "SE" from
-     * &lt;field&gt;SE&lt;/field&gt;&lt;field&gt;SUPPLIERID::92&lt;/field&gt;).
-     * Returns null if it can't find/parse a qualifier. Adjust the parsing
-     * here if EdiSegment exposes fields as a structured list instead of
-     * raw XML -- prefer that over regex if available.
-     */
     private static String extractFirstFieldQualifier(String rawSegmentXml) {
         int start = rawSegmentXml.indexOf("<field>");
         if (start < 0)
@@ -493,6 +455,47 @@ public class EdiToIdocRagAssembler {
             return null;
         String value = rawSegmentXml.substring(start, end).trim();
         return value.isEmpty() ? null : value;
+    }
+
+    /**
+     * FIX (new): extracts the literal line-number(s) from a LIN segment's
+     * raw XML. Handles both shapes documented in PromptHelper: a single
+     * "line_number, code:qualifier" pair, or multiple pairs concatenated
+     * as repeating (line_number, code:qualifier) fields -- in which case
+     * every ODD-indexed field (0-based: 0, 2, 4, ...) is a line number.
+     */
+    private static List<String> extractLinLineNumbers(String rawSegmentXml) {
+        List<String> lineNumbers = new ArrayList<>();
+        List<String> fields = new ArrayList<>();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("<field>(.*?)</field>")
+                .matcher(rawSegmentXml);
+        while (m.find()) {
+            fields.add(m.group(1).trim());
+        }
+        // fields = [lineNo1, code:qual1, lineNo2, code:qual2, ...]
+        for (int i = 0; i < fields.size(); i += 2) {
+            String candidate = fields.get(i);
+            if (candidate.matches("\\d+")) {
+                lineNumbers.add(candidate);
+            }
+        }
+        return lineNumbers;
+    }
+
+    /**
+     * FIX (new): re-renders this batch's segments in the same
+     * "Segment N of M -- name: X" shape the initial prompt used, so it can
+     * be embedded verbatim into a corrective retry prompt as ground truth.
+     */
+    private static String buildRawBatchSegmentsText(List<EdiSegment> batch) {
+        StringBuilder sb = new StringBuilder();
+        int segNo = 1;
+        for (EdiSegment segment : batch) {
+            sb.append("Segment ").append(segNo++).append(" of ").append(batch.size())
+              .append(" -- name: ").append(segment.getName()).append("\n");
+            sb.append(segment.getRawXml()).append("\n\n");
+        }
+        return sb.toString();
     }
 
     @Data
