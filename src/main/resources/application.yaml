@@ -25,7 +25,7 @@ app:
 ollama:
   url: http://localhost:11434/api/generate
   embeddings-url: http://localhost:11434/api/embeddings
-  model: llama3.2:3b
+  model: qwen2.5-coder:7b
   embedding-model: nomic-embed-text
 
 qdrant:

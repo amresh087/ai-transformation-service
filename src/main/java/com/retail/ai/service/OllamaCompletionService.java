@@ -22,6 +22,22 @@ public class OllamaCompletionService implements CompletionService {
     @Value("${ollama.model}")
     private String model;
 
+    // IMPORTANT: Ollama's default context window is 2048 tokens unless
+    // overridden here, REGARDLESS of what the underlying model actually
+    // supports (e.g. a llama3.1 model supports 128k natively, but Ollama
+    // will still cap you at 2048 unless num_ctx is set). Our IDoc mapping
+    // prompts run ~20-25k characters (~5-6k tokens) once the rules/golden
+    // example/segments/chunks are all included, so leaving this unset
+    // silently truncates most of the prompt -- the model never actually
+    // sees the real segment data, and produces ungrounded/generic output.
+    //
+    // Rough sizing: 1 token =~ 4 characters for English/XML-ish text.
+    // Set this comfortably above (prompt tokens + expected output tokens).
+    // Increasing this raises RAM/VRAM usage on the Ollama side, so if you
+    // hit OOM errors, that's the trade-off to tune.
+    @Value("${ollama.num-ctx:8192}")
+    private int numCtx;
+
     @Override
     public CompletionResponse generateCompletion(CompletionRequest request) {
         Map<String, Object> payload = new HashMap<>();
@@ -29,14 +45,17 @@ public class OllamaCompletionService implements CompletionService {
         payload.put("prompt", request.getPrompt());
         payload.put("stream", false);
 
-       // System.out.println("Ollama URL:==========> " + ollamaUrl);
-       // System.out.println("Ollama Model: =======> " + model);
-       // System.out.println("Prompt: =============> " + request.getPrompt());
-        
-
+        int approxPromptTokens = request.getPrompt().length() / 4;
+        if (approxPromptTokens > numCtx * 0.9) {
+            System.err.println("----> WARNING: prompt is ~" + approxPromptTokens
+                    + " tokens, which is close to or exceeds num_ctx=" + numCtx
+                    + ". Increase ollama.num-ctx or shorten the prompt, or "
+                    + "the model will silently lose context.");
+        }
 
         Map<String, Object> options = new HashMap<>();
         options.put("temperature", 0);
+        options.put("num_ctx", numCtx);
         payload.put("options", options);
 
         Map<?, ?> response = restTemplate.postForObject(ollamaUrl, payload, Map.class);
