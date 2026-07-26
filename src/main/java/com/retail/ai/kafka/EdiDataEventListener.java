@@ -1,23 +1,16 @@
 package com.retail.ai.kafka;
-
+import java.util.concurrent.ExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.support.Acknowledgment;
 import org.springframework.stereotype.Service;
-
 import com.retail.ai.dto.EdiDataEvent;
-import com.retail.ai.edi.DeterministicEdiToIdocMapper;
 import com.retail.ai.edi.EdiToIdocRagAssembler;
 import com.retail.ai.edi.MappingChunkProvider;
-import com.retail.ai.edi.SegmentHierarchyRuleResolver;
 import com.retail.ai.service.CompletionService;
 import com.retail.ai.service.IdocXmlStorageService;
-import com.retail.ai.service.OllamaService;
-
 import lombok.RequiredArgsConstructor;
-
-import java.util.concurrent.ExecutorService;
 
 @Service
 @RequiredArgsConstructor
@@ -25,10 +18,8 @@ public class EdiDataEventListener {
 
     private static final Logger log = LoggerFactory.getLogger(EdiDataEventListener.class);
 
-    private final OllamaService ollamaService;
     private final MappingChunkProvider mappingChunkProvider;
     private final CompletionService completionService;
-    private final DeterministicEdiToIdocMapper deterministicMapper;
     private final IdocXmlStorageService idocXmlStorageService;
     private final ExecutorService executorService;
 
@@ -58,17 +49,7 @@ public class EdiDataEventListener {
     private void processEventAsync(EdiDataEvent event) {
         try {
             log.info("Processing EDI payload for document {}", event.getDocumentId());
-
-            SegmentHierarchyRuleResolver resolver = new SegmentHierarchyRuleResolver(
-                    "default",
-                    event.getTenant(),
-                    event.getTransactionTypeCode());
-
-            EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(
-                    resolver,
-                    mappingChunkProvider,
-                    completionService,
-                    deterministicMapper);
+            EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(mappingChunkProvider,completionService);
 
             EdiToIdocRagAssembler.AssemblyResult assemblyResult = assembler.assemble(
                     event.getPayload(),

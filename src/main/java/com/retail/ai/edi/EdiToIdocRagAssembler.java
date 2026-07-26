@@ -1,31 +1,16 @@
 package com.retail.ai.edi;
 
-import java.io.StringReader;
-import java.io.StringWriter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
-
-import javax.xml.parsers.DocumentBuilderFactory;
-import javax.xml.transform.OutputKeys;
-import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerFactory;
-import javax.xml.transform.dom.DOMSource;
-import javax.xml.transform.stream.StreamResult;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.xml.sax.InputSource;
-
 import com.retail.ai.dto.CompletionRequest;
 import com.retail.ai.dto.CompletionResponse;
 import com.retail.ai.service.CompletionService;
 import com.retail.ai.utilty.PromptHelper;
-
 import lombok.Builder;
 import lombok.Data;
 
@@ -33,160 +18,28 @@ public class EdiToIdocRagAssembler {
 
     private static final Logger log = LoggerFactory.getLogger(EdiToIdocRagAssembler.class);
 
-    private final SegmentHierarchyRuleResolver resolver;
     private final MappingChunkProvider mappingChunkProvider;
     private final CompletionService completionService;
-    private final DeterministicEdiToIdocMapper deterministicMapper;
-    private final DeterministicIdocHeaderBuilder headerBuilder;
 
-    public EdiToIdocRagAssembler(SegmentHierarchyRuleResolver resolver,
-                                  MappingChunkProvider mappingChunkProvider,
-                                  CompletionService completionService,
-                                  DeterministicEdiToIdocMapper deterministicMapper) {
-        this.resolver = resolver;
+    public EdiToIdocRagAssembler(MappingChunkProvider mappingChunkProvider, CompletionService completionService) {
         this.mappingChunkProvider = mappingChunkProvider;
         this.completionService = completionService;
-        this.deterministicMapper = deterministicMapper;
-        this.headerBuilder = new DeterministicIdocHeaderBuilder();
     }
-
-    
-
-public AssemblyResult assembleold(String ediXml, String tenant, String transactionTypeCode) {
-
-    log.info("========== IDOC Assembly Started ==========");
-    log.info("Tenant: {}, TransactionType: {}", tenant, transactionTypeCode);
-
-    EdiXmlParser parser = new EdiXmlParser();
-    List<EdiSegment> segments = parser.parse(ediXml);
-
-    log.info("Total EDI Segments Parsed: {}", segments.size());
-
-    // Initial empty IDOC
-    String currentIdocXml = """
-            <ORDERS05>
-                <IDOC BEGIN="1">
-                </IDOC>
-            </ORDERS05>
-            """;
-
-    int segmentNo = 1;
-
-    for (EdiSegment segment : segments) {
-
-        System.out.println("--------------------------********************************************------------------------------");
-
-        System.out.println(String.format("---->Processing Segment %d/%d", segmentNo++, segments.size()));
-        System.out.println(String.format("----> Segment Name : %s", segment.getName()));
-        System.out.println(String.format("-----> Segment XML :%n%s", segment.getRawXml()));
-
-        long retrievalStart = System.currentTimeMillis();
-
-        List<MappingChunk> mappingChunks =
-                mappingChunkProvider.fetchMappingChunk(
-                        tenant,
-                        transactionTypeCode,
-                        segment.getName(),
-                        segment.getRawXml());
-
-        long retrievalEnd = System.currentTimeMillis();
-
-        System.out.println("---> Vector Search Time : " + (retrievalEnd - retrievalStart));
-
-        if (mappingChunks == null || mappingChunks.isEmpty()) {
-            System.out.println("---->No mapping chunks found for segment " + segment.getName());
-            continue;
-        }
-
-        // Build prompt with previous IDOC
-        String prompt = PromptHelper.buildPromptIDocMapping(
-                segment,
-                mappingChunks,
-                currentIdocXml);
-
-        // System.out.println("---->Generated Prompt: " + prompt);
-
-        CompletionRequest request = new CompletionRequest();
-        request.setPrompt(prompt);
-
-        System.out.println("---->Calling LLM...");
-
-        long llmStart = System.currentTimeMillis();
-
-        CompletionResponse response = completionService.generateCompletion(request);
-
-        long llmEnd = System.currentTimeMillis();
-
-        System.out.println("--->LLM Response Time :" + (llmEnd - llmStart) + " ms");
-
-        String completionText =
-                response != null && response.getText() != null
-                        ? response.getText().trim()
-                        : "";
-
-        System.out.println("---> LLM Response Length : " + completionText.length());
-        System.out.println("--->LLM Generated XML: " + completionText);
-
-        if (completionText.isBlank()) {
-            System.err.println("----> Segment " + segment.getName() + " returned empty response.");
-            continue;
-        }
-
-        if ("<unmapped/>".equalsIgnoreCase(completionText)) {
-            System.err.println("----> Segment " + segment.getName() + " could not be mapped.");
-            continue;
-        }
-
-       
-
-        // Update current IDOC
-        currentIdocXml = completionText;
-
-        System.out.println("*******************************************");
-        System.out.println(currentIdocXml);
-        System.out.println("*******************************************");
-
-        System.err.println("--->Segment " + segment.getName() + " successfully merged into IDOC.");
-
-        try {
-            System.out.println("Waiting 5 seconds before next LLM call...");
-            Thread.sleep(5_000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.out.println("Thread interrupted while waiting.");
-            break;
-        }
-    }
-
-    System.out.println("========== IDOC Assembly Completed ==========");
-    System.out.println("------>Final IDOC Length : " + currentIdocXml.length());
-    System.err.println("---------> Final IDOC : ");
-    System.err.println(currentIdocXml);
-
-    // TODO: Parse currentIdocXml into your AssemblyResult
-    return null;
-}
-
- 
-
-
-
-
 
     // Tune this. Larger batches = fewer LLM calls but bigger prompts and
     // more chance the model loses track of correlation across many
     // LIN/PIA/IMD/QTY/PRI segments in one shot. 3-5 is a reasonable start.
     private static final int BATCH_SIZE = 5;
- 
+
     // Delay between batches (not between every single segment anymore).
     // Set to 0 if your completionService has no rate limit concerns.
     private static final long DELAY_BETWEEN_BATCHES_MS = 2_000;
- 
+
     // How many corrective re-prompts to allow per batch attempt before
     // giving up on THAT attempt (autoFix/validate retry loop within a
     // single batch call).
     private static final int MAX_CORRECTION_ATTEMPTS = 2;
- 
+
     // How many times a discarded batch's segments may be REQUEUED as a
     // fresh, isolated batch of their own before being permanently dropped.
     // This is what prevents data loss when a batch fails validation and
@@ -194,7 +47,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
     // one (or more) more isolated shot(s), separate from whatever batch
     // they originally arrived in.
     private static final int MAX_REQUEUE_ATTEMPTS = 1;
- 
+
     /**
      * Small wrapper so we can track how many times a given group of
      * segments has already been requeued after a discard, and stop
@@ -203,28 +56,25 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
     private static class BatchUnit {
         final List<EdiSegment> segments;
         final int requeueCount;
- 
+
         BatchUnit(List<EdiSegment> segments, int requeueCount) {
             this.segments = segments;
             this.requeueCount = requeueCount;
         }
     }
- 
+
     public AssemblyResult assemble(String ediXml, String tenant, String transactionTypeCode) {
- 
+
         log.info("========== IDOC Assembly Started (Batched) ==========");
         log.info("Tenant: {}, TransactionType: {}", tenant, transactionTypeCode);
- 
+
         EdiXmlParser parser = new EdiXmlParser();
         List<EdiSegment> segments = parser.parse(ediXml);
- 
-        log.info("Total EDI Segments Parsed: {}", segments.size());
- 
         // Ground-truth CREDAT, captured once from the raw segment stream
         // before any LLM involvement, so validate() can check the LLM's
         // output against it instead of trusting its judgment.
         String expectedCredat = extractExpectedCredat(segments);
- 
+
         // Initial empty IDOC
         String currentIdocXml = """
                 <ORDERS05>
@@ -232,13 +82,13 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                     </IDOC>
                 </ORDERS05>
                 """;
- 
+
         // FIX #3a: batch by item group (cut before each new LIN) instead of
         // blind fixed-size chunking, so QTY/PRI segments belonging to one
         // LIN item never get split across a batch boundary from a
         // different item's LIN/QTY/PRI segments.
         List<List<EdiSegment>> initialBatches = partitionByItemGroup(segments, BATCH_SIZE);
- 
+
         // FIX (data loss): use a work queue instead of a plain for-each, so
         // a discarded batch's segments can be pushed back onto the front of
         // the queue and retried as their own isolated batch, instead of
@@ -247,76 +97,57 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
         for (List<EdiSegment> b : initialBatches) {
             workQueue.add(new BatchUnit(b, 0));
         }
- 
+
         int batchNo = 1;
         int totalBatchesForLogging = initialBatches.size();
- 
+
         while (!workQueue.isEmpty()) {
- 
             BatchUnit unit = workQueue.poll();
             List<EdiSegment> batch = unit.segments;
- 
             System.out.println("--------------------------********************************************------------------------------");
             System.out.println(String.format("---->Processing Batch %d/%d%s (%d segments)",
                     batchNo, totalBatchesForLogging,
                     unit.requeueCount > 0 ? " [requeue attempt " + unit.requeueCount + "]" : "",
                     batch.size()));
- 
+
             for (EdiSegment segment : batch) {
                 System.out.println(String.format("----> Segment Name : %s", segment.getName()));
                 System.out.println(String.format("-----> Segment XML :%n%s", segment.getRawXml()));
             }
- 
+
             long retrievalStart = System.currentTimeMillis();
- 
             // Fetch mapping chunks for every segment in the batch, then
             // de-dupe by chunk text so the same reference doesn't get
             // repeated in the prompt if multiple segments in the batch
             // hit the same chunk.
             LinkedHashMap<String, MappingChunk> chunkMap = new LinkedHashMap<>();
             for (EdiSegment segment : batch) {
-                List<MappingChunk> chunksForSegment =
-                        mappingChunkProvider.fetchMappingChunk(
-                                tenant,
-                                transactionTypeCode,
-                                segment.getName(),
-                                segment.getRawXml());
- 
+                List<MappingChunk> chunksForSegment = mappingChunkProvider.fetchMappingChunk(
+                        tenant,
+                        transactionTypeCode,
+                        segment.getName(),
+                        segment.getRawXml());
+
                 if (chunksForSegment != null) {
                     for (MappingChunk chunk : chunksForSegment) {
                         chunkMap.putIfAbsent(chunk.getChunkText(), chunk);
                     }
                 }
             }
- 
+
             long retrievalEnd = System.currentTimeMillis();
- 
             System.out.println("---> Vector Search Time (batch) : " + (retrievalEnd - retrievalStart));
- 
             List<MappingChunk> mappingChunks = new ArrayList<>(chunkMap.values());
- 
             if (mappingChunks.isEmpty()) {
                 System.out.println("---->No mapping chunks found for batch " + batchNo);
                 batchNo++;
                 continue;
             }
- 
             // Snapshot BEFORE this batch's call, so validate() can detect
             // if the LLM silently deletes previously-built content, and so
             // we have something safe to revert to if this batch fails.
             String idocBeforeBatch = currentIdocXml;
- 
-            // FIX (impossible-requirement bug): compute the expected PARVW
-            // set FRESH for THIS batch only, as (PARVW values already
-            // present in idocBeforeBatch) UNION (NAD qualifiers appearing
-            // in THIS batch's segments). Do NOT accumulate NAD qualifiers
-            // globally across the whole document regardless of whether
-            // their batch succeeded -- that created a permanently
-            // unsatisfiable requirement once any NAD-containing batch got
-            // discarded (its qualifier could never appear again, since
-            // that NAD segment is never re-shown to the LLM in a later
-            // batch), which silently blocked every subsequent batch's
-            // validation for the rest of the run.
+            
             List<String> expectedParvwCodesForBatch = extractParvwValues(idocBeforeBatch);
             for (EdiSegment segment : batch) {
                 if ("NAD".equals(segment.getName())) {
@@ -326,34 +157,28 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                     }
                 }
             }
- 
             // Build prompt with previous IDOC + ALL segments in this batch
             String prompt = PromptHelper.buildPromptIDocMappingBatch(
                     batch,
                     mappingChunks,
                     currentIdocXml);
- 
+
             String completionText = callLlmForBatch(prompt, batchNo);
- 
             if (completionText == null) {
                 // empty / unmapped -- callLlmForBatch already logged why
                 batchNo++;
                 continue;
             }
- 
             // Deterministic, safe fixes first (no LLM involvement, can't
             // get these wrong): BEGIN attr, TABNAM, PARTN colon-strip,
             // CREDAT century-expand, non-numeric DOCNUM removal.
             completionText = IdocXmlValidator.autoFix(completionText);
- 
             // Structural + semantic checks that DO require judgment to fix
             // (dropped E1EDP19 code, deleted prior content, wrong-source
             // CREDAT, reinterpreted PARVW) get a bounded number of
             // corrective re-prompts.
-            IdocXmlValidator.ValidationResult validation =
-                    IdocXmlValidator.validate(completionText, idocBeforeBatch,
-                            expectedCredat, expectedParvwCodesForBatch);
- 
+            IdocXmlValidator.ValidationResult validation = IdocXmlValidator.validate(completionText, idocBeforeBatch,
+                    expectedCredat, expectedParvwCodesForBatch);
             // DIAGNOSTIC: log unconditionally (not just on failure) so we
             // can confirm validate() is actually being called with the
             // real idocBeforeBatch and actually returning what we expect,
@@ -365,36 +190,31 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
             System.out.println("---->completionText E1EDP01 POSEX values: "
                     + extractPosexValues(completionText));
             System.out.println("---->expectedParvwCodesForBatch: " + expectedParvwCodesForBatch);
- 
+
             int attempt = 0;
             while (!validation.valid && attempt < MAX_CORRECTION_ATTEMPTS) {
                 attempt++;
                 System.err.println("----> Batch " + batchNo + " failed validation (attempt "
                         + attempt + "/" + MAX_CORRECTION_ATTEMPTS + "):");
                 validation.errors.forEach(e -> System.err.println("       - " + e));
- 
+
                 String correctivePrompt = IdocXmlValidator.buildCorrectivePrompt(completionText, validation.errors);
- 
+
                 String corrected = callLlmForBatch(correctivePrompt, batchNo);
                 if (corrected == null) {
                     break; // empty/unmapped correction response -- stop retrying, keep last good text
                 }
- 
+
                 corrected = IdocXmlValidator.autoFix(corrected);
                 validation = IdocXmlValidator.validate(corrected, idocBeforeBatch,
                         expectedCredat, expectedParvwCodesForBatch);
                 completionText = corrected;
- 
+
                 // DIAGNOSTIC: same unconditional log, for each retry.
-                System.out.println("---->Batch " + batchNo + " retry " + attempt
-                        + " validation.valid=" + validation.valid
-                        + ", errors=" + validation.errors.size());
-                System.out.println("---->idocBeforeBatch E1EDP01 POSEX values: "
-                        + extractPosexValues(idocBeforeBatch));
-                System.out.println("---->corrected E1EDP01 POSEX values: "
-                        + extractPosexValues(completionText));
+                System.out.println("---->Batch " + batchNo + " retry " + attempt+ " validation.valid=" + validation.valid+ ", errors=" + validation.errors.size());
+                System.out.println("---->idocBeforeBatch E1EDP01 POSEX values: "+ extractPosexValues(idocBeforeBatch));
+                System.out.println("---->corrected E1EDP01 POSEX values: "+ extractPosexValues(completionText));
             }
- 
             if (!validation.valid) {
                 // FIX (data loss): instead of silently dropping this
                 // batch's segments forever, requeue them as their own
@@ -408,7 +228,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                             + batch.size() + " segment(s) as an isolated retry batch (attempt "
                             + (unit.requeueCount + 1) + "/" + MAX_REQUEUE_ATTEMPTS + "):");
                     validation.errors.forEach(e -> System.err.println("       - " + e));
- 
+
                     workQueue.addFirst(new BatchUnit(batch, unit.requeueCount + 1));
                     currentIdocXml = idocBeforeBatch;
                 } else {
@@ -427,7 +247,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                     validation.errors.forEach(e -> System.err.println("       - " + e));
                     currentIdocXml = idocBeforeBatch;
                 }
- 
+
                 if (DELAY_BETWEEN_BATCHES_MS > 0) {
                     try {
                         System.out.println("Waiting " + DELAY_BETWEEN_BATCHES_MS + " ms before next batch...");
@@ -441,16 +261,14 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                 batchNo++;
                 continue;
             }
- 
+
             // Update current IDOC
             currentIdocXml = completionText;
- 
             System.out.println("*******************************************");
             System.out.println(currentIdocXml);
             System.out.println("*******************************************");
- 
             System.err.println("--->Batch " + batchNo + " successfully merged into IDOC.");
- 
+
             if (DELAY_BETWEEN_BATCHES_MS > 0) {
                 try {
                     System.out.println("Waiting " + DELAY_BETWEEN_BATCHES_MS + " ms before next batch...");
@@ -461,19 +279,19 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
                     break;
                 }
             }
- 
+
             batchNo++;
         }
- 
+
         System.out.println("========== IDOC Assembly Completed ==========");
         System.out.println("------>Final IDOC Length : " + currentIdocXml.length());
         System.err.println("---------> Final IDOC : ");
         System.err.println(currentIdocXml);
- 
+
         // TODO: Parse currentIdocXml into your AssemblyResult
         return null;
     }
- 
+
     /**
      * Calls the LLM with the given prompt and returns the trimmed response
      * text, or null if the response was blank or "&lt;unmapped/&gt;" (in
@@ -483,7 +301,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
     private String callLlmForBatch(String prompt, int batchNo) {
         CompletionRequest request = new CompletionRequest();
         request.setPrompt(prompt);
- 
+
         // DIAGNOSTIC: confirm the outgoing prompt actually differs per
         // batch and actually contains the real segment content, rather
         // than trusting that it does. Remove once confirmed.
@@ -506,46 +324,46 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
             // don't repeat the full segment-list section. Only worth
             // investigating if this fires on the FIRST call of a batch
             // (the long ~20k+ char prompt), not on retries.
-            System.out.println("---->WARNING: real segment-list section header not found in prompt for batch " + batchNo);
+            System.out
+                    .println("---->WARNING: real segment-list section header not found in prompt for batch " + batchNo);
         }
- 
+
         System.out.println("---->Calling LLM for batch " + batchNo + "...");
- 
+
         long llmStart = System.currentTimeMillis();
- 
+
         CompletionResponse response = completionService.generateCompletion(request);
- 
+
         long llmEnd = System.currentTimeMillis();
- 
+
         System.out.println("--->LLM Response Time :" + (llmEnd - llmStart) + " ms");
- 
-        String completionText =
-                response != null && response.getText() != null
-                        ? response.getText().trim()
-                        : "";
- 
+
+        String completionText = response != null && response.getText() != null
+                ? response.getText().trim()
+                : "";
+
         System.out.println("---> LLM Response Length : " + completionText.length());
         System.out.println("--->LLM Generated XML: " + completionText);
- 
+
         if (completionText.isBlank()) {
             System.err.println("----> Batch " + batchNo + " returned empty response.");
             return null;
         }
- 
+
         if ("<unmapped/>".equalsIgnoreCase(completionText)) {
             System.err.println("----> Batch " + batchNo + " could not be mapped.");
             return null;
         }
- 
+
         // Model frequently wraps its answer in ```xml ... ``` even though
         // the prompt says not to. Strip it here, once, so every downstream
         // consumer (autoFix, validate, merge into currentIdocXml) always
         // sees raw XML.
         completionText = IdocXmlValidator.stripCodeFences(completionText);
- 
+
         return completionText;
     }
- 
+
     /**
      * FIX #3a: Splits a list into consecutive sublists of at most
      * {@code maxSize} elements, but never splits a LIN item's related
@@ -576,7 +394,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
         }
         return result;
     }
- 
+
     /**
      * DIAGNOSTIC helper: extracts every POSEX value found in a given IDoc
      * XML string, purely for logging. Returns a bracketed list like
@@ -585,7 +403,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
     private static List<String> extractPosexValues(String xml) {
         return extractChildTextValues(xml, "E1EDP01", "POSEX");
     }
- 
+
     /**
      * Extracts every PARVW value currently present in a given IDoc XML
      * string. Used to seed the per-batch expected-PARVW set with whatever
@@ -597,15 +415,14 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
     private static List<String> extractParvwValues(String xml) {
         return extractChildTextValues(xml, "E1EDKA1", "PARVW");
     }
- 
+
     private static List<String> extractChildTextValues(String xml, String parentTag, String childTag) {
         List<String> result = new ArrayList<>();
         if (xml == null || xml.isBlank()) {
             return result;
         }
         try {
-            javax.xml.parsers.DocumentBuilderFactory dbf =
-                    javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            javax.xml.parsers.DocumentBuilderFactory dbf = javax.xml.parsers.DocumentBuilderFactory.newInstance();
             dbf.setNamespaceAware(false);
             org.w3c.dom.Document doc = dbf.newDocumentBuilder()
                     .parse(new java.io.ByteArrayInputStream(
@@ -626,7 +443,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
         }
         return result;
     }
- 
+
     /**
      * FIX #1: Finds the UNB segment in the full segment list and extracts
      * its date field (format "YYMMDD:HHMM", e.g. "200722:1500"),
@@ -657,7 +474,7 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
         }
         return null;
     }
- 
+
     /**
      * FIX #2: Extracts the qualifier code from a NAD segment's raw XML
      * (the first &lt;field&gt;, e.g. "SE" from
@@ -668,14 +485,15 @@ public AssemblyResult assembleold(String ediXml, String tenant, String transacti
      */
     private static String extractFirstFieldQualifier(String rawSegmentXml) {
         int start = rawSegmentXml.indexOf("<field>");
-        if (start < 0) return null;
+        if (start < 0)
+            return null;
         start += "<field>".length();
         int end = rawSegmentXml.indexOf("</field>", start);
-        if (end < 0) return null;
+        if (end < 0)
+            return null;
         String value = rawSegmentXml.substring(start, end).trim();
         return value.isEmpty() ? null : value;
     }
-   
 
     @Data
     @Builder
