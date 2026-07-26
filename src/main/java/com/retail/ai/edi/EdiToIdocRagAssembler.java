@@ -96,7 +96,7 @@ public class EdiToIdocRagAssembler {
                     batch.size()));
 
             for (EdiSegment segment : batch) {
-                System.out.println(String.format("----> Segment Name : %s", segment.getName()));     
+                System.out.println(String.format("----> Segment Name : %s", segment.getName()));
             }
 
             long retrievalStart = System.currentTimeMillis();
@@ -168,7 +168,8 @@ public class EdiToIdocRagAssembler {
 
             completionText = IdocXmlValidator.autoFix(completionText);
             IdocXmlValidator.ValidationResult validation = IdocXmlValidator.validate(completionText, idocBeforeBatch,
-                    expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch);
+                    expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch,
+                    batch);
 
             System.out.println("---->Batch " + batchNo + " validation.valid=" + validation.valid
                     + ", errors=" + validation.errors.size());
@@ -199,7 +200,8 @@ public class EdiToIdocRagAssembler {
 
                 corrected = IdocXmlValidator.autoFix(corrected);
                 validation = IdocXmlValidator.validate(corrected, idocBeforeBatch,
-                        expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch);
+                        expectedCredat, expectedParvwCodesForBatch, expectedPosexCodesForBatch,
+                        batch);
                 completionText = corrected;
 
                 System.out.println("---->Batch " + batchNo + " retry " + attempt+ " validation.valid=" + validation.valid+ ", errors=" + validation.errors.size());
@@ -262,13 +264,10 @@ public class EdiToIdocRagAssembler {
             int beforeCount = countElements(idocBeforeBatch);
             int afterCount = countElements(currentIdocXml);
             if (batchHadContentSegments && afterCount <= beforeCount) {
-                System.err.println("----> WARNING: Batch " + batchNo + " passed validation but the "
-                        + "merged IDoc's element count did not increase (" + beforeCount + " -> "
-                        + afterCount + ") despite containing content-bearing segments. Verify this "
-                        + "batch's data actually landed in the output.");
+                log.warn("----> WARNING: Batch {} passed validation but the merged IDoc's element count did not increase ({} -> {}) despite containing content-bearing segments. Verify this batch's data actually landed in the output.",
+                        batchNo, beforeCount, afterCount);
             } else {
-                System.out.println("---->Batch " + batchNo + " element count: " + beforeCount
-                        + " -> " + afterCount);
+                log.info("---->Batch {} element count: {} -> {}", batchNo, beforeCount, afterCount);
             }
 
             if (DELAY_BETWEEN_BATCHES_MS > 0) {

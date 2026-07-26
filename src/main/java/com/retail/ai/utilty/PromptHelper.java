@@ -164,12 +164,18 @@ public class PromptHelper {
                            "BUYERID::92" -> "BUYERID", "SUPPLIERID::92" -> "SUPPLIERID"
                     -> never merge two different NAD qualifiers into one E1EDKA1
                     -> EVERY NAD segment present in the batch MUST produce its
-                       own E1EDKA1. If the batch has a BY and a SE/SU, the
-                       output MUST have both E1EDKA1 segments. Dropping one is
-                       a critical error -- before finishing, count the NAD
-                       segments in the batch and confirm the same count of
-                       NEW E1EDKA1 segments has been added to the output
-                       (on top of any that already existed in CURRENT IDOC).
+                       own E1EDKA1. If the batch has both BY and SE/SU, the
+                       output MUST contain both corresponding E1EDKA1 segments.
+                       Do not drop SE just because the current IDOC already
+                       contains BY. Omit no source NAD segment that carries
+                       a party identifier.
+                    -> before returning your answer, count the NAD segments in
+                       this batch and confirm that your output contains the
+                       same number of NEW E1EDKA1 segments (on top of any that
+                       already existed in the CURRENT IDOC).
+                    -> preserve the exact qualifier codes from the source NAD
+                       segments; do not substitute, normalize, or omit any
+                       qualifier that is present in the CURRENT EDI SEGMENTS.
  
                 CUX, currency
                     format "2:EUR:4" -> field 2 is the ISO currency code
@@ -259,6 +265,9 @@ public class PromptHelper {
                     (qualifier code itself, e.g. 21 vs 22, does not change the
                     IDoc target field -- both map to MENGE/MENEE for their
                     respective line item)
+                    -> do NOT copy the quantity qualifier (the first part of
+                       the QTY field) into MENGE. MENGE must always be the
+                       numeric amount, never the qualifier code.
  
                 PRI, price
                     format "AAA:20.00" -> field 2 is the net price
@@ -405,6 +414,10 @@ public class PromptHelper {
                 QTY/PIA), append/attach the values per the rules above. If it
                 starts a new repeating structure not yet present (E1EDP01,
                 E1EDKA1, etc.), create a NEW SAP segment.
+                Existing E1EDKA1 and E1EDP01 segments must remain in the same
+                order they already appear in the CURRENT IDOC; add any new
+                segments after the already-present ones instead of reordering
+                or replacing them.
  
                 ==================================================
                 CURRENT IDOC

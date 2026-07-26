@@ -1,5 +1,8 @@
 package com.retail.ai.edi;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+
 // NOTE: adjust package/imports to match your actual project structure.
 //
 // CHANGES IN THIS VERSION (fixes for the SU-party / ITEM1003 bugs):
@@ -33,20 +36,21 @@ package com.retail.ai.edi;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
+
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
-import java.io.ByteArrayInputStream;
-import java.nio.charset.StandardCharsets;
 
 public class IdocXmlValidator {
 
@@ -152,7 +156,17 @@ public class IdocXmlValidator {
     public static ValidationResult validate(String xml, String previousIdocXml,
                                              String expectedCredat,
                                              List<String> expectedParvwCodes) {
-        return validate(xml, previousIdocXml, expectedCredat, expectedParvwCodes, null);
+        return validate(xml, previousIdocXml, expectedCredat, expectedParvwCodes, null, null);
+    }
+
+    /**
+     * Backward-compatible 5-arg overload -- no batch segment expectations.
+     */
+    public static ValidationResult validate(String xml, String previousIdocXml,
+                                             String expectedCredat,
+                                             List<String> expectedParvwCodes,
+                                             List<String> expectedPosexCodes) {
+        return validate(xml, previousIdocXml, expectedCredat, expectedParvwCodes, expectedPosexCodes, null);
     }
 
     /**
@@ -163,11 +177,15 @@ public class IdocXmlValidator {
      *                           doesn't correspond to a real source LIN
      *                           line number. Pass null/empty to skip this
      *                           check (e.g. if the caller doesn't track it).
+     * @param batchSegments      the original raw batch segments, used to
+     *                           validate expected quantity, expected item
+     *                           code counts, and expected line-item text.
      */
     public static ValidationResult validate(String xml, String previousIdocXml,
                                              String expectedCredat,
                                              List<String> expectedParvwCodes,
-                                             List<String> expectedPosexCodes) {
+                                             List<String> expectedPosexCodes,
+                                             List<EdiSegment> batchSegments) {
         List<String> errors = new ArrayList<>();
 
         Document doc;
@@ -261,11 +279,14 @@ public class IdocXmlValidator {
         }
 
         // Same idea for POSEX: every value must trace back to a real LIN
-        // line number seen so far; anything else is fabricated.
+        // line number seen so far; anything else is fabricated. Every expected
+        // source POSEX must also be present in the output.
         if (expectedPosexCodes != null && !expectedPosexCodes.isEmpty()) {
             NodeList lineItemsForPosexCheck = doc.getElementsByTagName("E1EDP01");
+            List<String> actualPosexValues = new ArrayList<>();
             for (int i = 0; i < lineItemsForPosexCheck.getLength(); i++) {
                 String posex = firstChildText((Element) lineItemsForPosexCheck.item(i), "POSEX");
+                actualPosexValues.add(posex);
                 if (!expectedPosexCodes.contains(posex)) {
                     errors.add("POSEX=\"" + posex + "\" appears in the output but does not "
                             + "correspond to any real source LIN line number seen so far "
@@ -273,6 +294,17 @@ public class IdocXmlValidator {
                             + "fabricated.");
                 }
             }
+            for (String expected : expectedPosexCodes) {
+                if (!actualPosexValues.contains(expected)) {
+                    errors.add("Expected E1EDP01/POSEX=\"" + expected + "\" but it is missing from the output. "
+                            + "Preserve every source LIN line number, including any new ones introduced by this batch.");
+                }
+            }
+        }
+
+        if (batchSegments != null && !batchSegments.isEmpty()) {
+            BatchExpectations expectations = inferBatchExpectations(batchSegments);
+            validateBatchExpectations(doc, expectations, errors);
         }
 
         NodeList docnumNodes = doc.getElementsByTagName("DOCNUM");
@@ -285,13 +317,31 @@ public class IdocXmlValidator {
         }
 
         NodeList lineItems = doc.getElementsByTagName("E1EDP01");
+        List<String> posexOrder = new ArrayList<>();
+        boolean allNumericPosex = true;
         for (int i = 0; i < lineItems.getLength(); i++) {
             Element lineItem = (Element) lineItems.item(i);
             NodeList e1edp19 = lineItem.getElementsByTagName("E1EDP19");
             String posex = firstChildText(lineItem, "POSEX");
+            posexOrder.add(posex);
+            if (!posex.matches("\\d+")) {
+                allNumericPosex = false;
+            }
             if (e1edp19.getLength() == 0) {
                 errors.add("E1EDP01 with POSEX=\"" + posex + "\" has no nested E1EDP19 "
                         + "(item code) -- the LIN item code was dropped.");
+            }
+        }
+
+        if (allNumericPosex && posexOrder.size() > 1) {
+            int previousValue = Integer.MIN_VALUE;
+            for (String posex : posexOrder) {
+                int currentValue = Integer.parseInt(posex);
+                if (previousValue != Integer.MIN_VALUE && currentValue < previousValue) {
+                    errors.add("E1EDP01 segments are out of order by POSEX. Preserve the source line item order and do not emit POSEX=" + currentValue + " before POSEX=" + previousValue + ".");
+                    break;
+                }
+                previousValue = currentValue;
             }
         }
 
@@ -346,7 +396,237 @@ public class IdocXmlValidator {
             }
         }
 
+        if (batchSegments != null && !batchSegments.isEmpty()) {
+            BatchExpectations expectations = inferBatchExpectations(batchSegments);
+            validateBatchExpectations(doc, expectations, errors);
+        }
+
         return new ValidationResult(errors.isEmpty(), errors);
+    }
+
+    private static BatchExpectations inferBatchExpectations(List<EdiSegment> segments) {
+        BatchExpectations expectations = new BatchExpectations();
+        String currentLine = null;
+        List<String> lineOrder = new ArrayList<>();
+
+        for (EdiSegment segment : segments) {
+            String name = segment.getName();
+            List<String> fields = segment.getFields();
+            if ("NAD".equals(name)) {
+                if (!fields.isEmpty()) {
+                    expectations.expectedParvwQualifiers.add(fields.get(0).trim());
+                }
+                continue;
+            }
+
+            if ("LIN".equals(name)) {
+                for (int i = 0; i + 1 < fields.size(); i += 2) {
+                    String lineNumber = fields.get(i).trim();
+                    if (!lineNumber.matches("\\d+")) {
+                        continue;
+                    }
+                    String codeQualifier = fields.get(i + 1).trim();
+                    if (!expectations.lineExpectations.containsKey(lineNumber)) {
+                        expectations.lineExpectations.put(lineNumber, new LineExpectation(lineNumber));
+                        lineOrder.add(lineNumber);
+                    }
+                    expectations.lineExpectations.get(lineNumber).needsItemCode = !codeQualifier.isBlank();
+                    currentLine = lineNumber;
+                }
+                continue;
+            }
+
+            if ("PIA".equals(name)) {
+                if (!fields.isEmpty() && currentLine != null) {
+                    expectations.lineExpectations
+                            .computeIfAbsent(currentLine, LineExpectation::new)
+                            .needsItemCode = true;
+                }
+                continue;
+            }
+
+            if ("IMD".equals(name)) {
+                if (!fields.isEmpty() && currentLine != null) {
+                    LineExpectation expectation = expectations.lineExpectations
+                            .computeIfAbsent(currentLine, LineExpectation::new);
+                    expectation.needsText = true;
+                    String value = fields.get(fields.size() - 1).trim();
+                    int lastColon = value.lastIndexOf(':');
+                    if (lastColon >= 0 && lastColon < value.length() - 1) {
+                        expectation.expectedText = value.substring(lastColon + 1).trim();
+                    } else {
+                        expectation.expectedText = value;
+                    }
+                }
+                continue;
+            }
+
+            if ("QTY".equals(name)) {
+                List<String> quantityEntries = new ArrayList<>();
+                for (String raw : fields) {
+                    if (!raw.isBlank()) {
+                        quantityEntries.add(raw.trim());
+                    }
+                }
+                if (!quantityEntries.isEmpty()) {
+                    if (quantityEntries.size() == 1 && currentLine != null) {
+                        parseQuantityEntry(quantityEntries.get(0), expectations
+                                .computeLineExpectation(currentLine));
+                    } else {
+                        int index = 0;
+                        for (String entry : quantityEntries) {
+                            if (index < lineOrder.size()) {
+                                parseQuantityEntry(entry, expectations
+                                        .computeLineExpectation(lineOrder.get(index)));
+                            } else if (currentLine != null) {
+                                parseQuantityEntry(entry, expectations
+                                        .computeLineExpectation(currentLine));
+                            }
+                            index++;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if ("PRI".equals(name)) {
+                List<String> priceEntries = new ArrayList<>();
+                for (String raw : fields) {
+                    if (!raw.isBlank()) {
+                        priceEntries.add(raw.trim());
+                    }
+                }
+                if (!priceEntries.isEmpty()) {
+                    if (priceEntries.size() == 1 && currentLine != null) {
+                        expectations.computeLineExpectation(currentLine).expectedNetwr = parsePriceValue(priceEntries.get(0));
+                    } else {
+                        int index = 0;
+                        for (String entry : priceEntries) {
+                            if (index < lineOrder.size()) {
+                                expectations.computeLineExpectation(lineOrder.get(index)).expectedNetwr = parsePriceValue(entry);
+                            } else if (currentLine != null) {
+                                expectations.computeLineExpectation(currentLine).expectedNetwr = parsePriceValue(entry);
+                            }
+                            index++;
+                        }
+                    }
+                }
+            }
+        }
+
+        return expectations;
+    }
+
+    private static void parseQuantityEntry(String entry, LineExpectation expectation) {
+        String[] parts = entry.split(":", -1);
+        if (parts.length >= 3) {
+            expectation.expectedAmount = parts[1].trim();
+            expectation.expectedUnit = parts[2].trim();
+            expectation.needsQuantity = true;
+        }
+    }
+
+    private static String parsePriceValue(String entry) {
+        String[] parts = entry.split(":", -1);
+        return parts.length >= 2 ? parts[1].trim() : null;
+    }
+
+    private static void validateBatchExpectations(Document doc, BatchExpectations expectations, List<String> errors) {
+        for (String qualifier : expectations.expectedParvwQualifiers) {
+            boolean found = false;
+            NodeList parvwNodes = doc.getElementsByTagName("PARVW");
+            for (int i = 0; i < parvwNodes.getLength(); i++) {
+                if (qualifier.equals(parvwNodes.item(i).getTextContent().trim())) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                errors.add("Expected E1EDKA1/PARVW=\"" + qualifier + "\" from the batch's NAD segment, but it is missing from the output.");
+            }
+        }
+
+        for (LineExpectation expectation : expectations.lineExpectations.values()) {
+            Element lineItem = findLineItemByPosex(doc, expectation.lineNumber);
+            if (lineItem == null) {
+                errors.add("Expected an E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" based on the batch's LIN/PIA segments, but it is missing.");
+                continue;
+            }
+            if (expectation.needsItemCode) {
+                NodeList e1edp19 = lineItem.getElementsByTagName("E1EDP19");
+                if (e1edp19.getLength() == 0) {
+                    errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" should include at least one E1EDP19 item code derived from LIN/PIA, but none was found.");
+                }
+            }
+            if (expectation.needsText) {
+                NodeList e1edpt1 = lineItem.getElementsByTagName("E1EDPT1");
+                if (e1edpt1.getLength() == 0) {
+                    errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" should include an E1EDPT1/TDLINE description derived from IMD, but none was found.");
+                } else if (expectation.expectedText != null && !expectation.expectedText.isBlank()) {
+                    String actualText = firstChildText((Element) e1edpt1.item(0), "TDLINE");
+                    if (!expectation.expectedText.equals(actualText)) {
+                        errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" has E1EDPT1/TDLINE=\"" + actualText + "\" but expected \"" + expectation.expectedText + "\" from the batch's IMD.");
+                    }
+                }
+            }
+            if (expectation.needsQuantity) {
+                String menge = firstChildText(lineItem, "MENGE");
+                String menee = firstChildText(lineItem, "MENEE");
+                if (menge.isBlank() || menee.isBlank()) {
+                    errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" should include quantity MENGE/MENEE derived from QTY, but one or both were missing.");
+                } else {
+                    if (expectation.expectedAmount != null && !expectation.expectedAmount.equals(menge)) {
+                        errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" has MENGE=\"" + menge + "\" but expected \"" + expectation.expectedAmount + "\" from the batch's QTY.");
+                    }
+                    if (expectation.expectedUnit != null && !expectation.expectedUnit.equals(menee)) {
+                        errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" has MENEE=\"" + menee + "\" but expected \"" + expectation.expectedUnit + "\" from the batch's QTY.");
+                    }
+                }
+            }
+            if (expectation.expectedNetwr != null) {
+                String netwr = firstChildText(lineItem, "NETWR");
+                if (netwr.isBlank()) {
+                    errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" should include E1EDP20/NETWR derived from PRI, but it was missing.");
+                } else if (!expectation.expectedNetwr.equals(netwr)) {
+                    errors.add("E1EDP01 with POSEX=\"" + expectation.lineNumber + "\" has NETWR=\"" + netwr + "\" but expected \"" + expectation.expectedNetwr + "\" from the batch's PRI.");
+                }
+            }
+        }
+    }
+
+    private static Element findLineItemByPosex(Document doc, String posex) {
+        NodeList lineItems = doc.getElementsByTagName("E1EDP01");
+        for (int i = 0; i < lineItems.getLength(); i++) {
+            Element lineItem = (Element) lineItems.item(i);
+            if (posex.equals(firstChildText(lineItem, "POSEX"))) {
+                return lineItem;
+            }
+        }
+        return null;
+    }
+
+    private static class BatchExpectations {
+        final Map<String, LineExpectation> lineExpectations = new LinkedHashMap<>();
+        final List<String> expectedParvwQualifiers = new ArrayList<>();
+
+        LineExpectation computeLineExpectation(String lineNumber) {
+            return lineExpectations.computeIfAbsent(lineNumber, LineExpectation::new);
+        }
+    }
+
+    private static class LineExpectation {
+        final String lineNumber;
+        boolean needsItemCode = false;
+        boolean needsText = false;
+        boolean needsQuantity = false;
+        String expectedText;
+        String expectedAmount;
+        String expectedUnit;
+        String expectedNetwr;
+
+        LineExpectation(String lineNumber) {
+            this.lineNumber = lineNumber;
+        }
     }
 
     private static Document parseQuietly(String xml) {
