@@ -56,13 +56,8 @@ public class EdiDataEventListener {
                     event.getTenant(),
                     event.getTransactionTypeCode());
 
-            if (assemblyResult != null && assemblyResult.isHasContent()) {
-                log.info("Assembled IDOC XML for document {} using {} segment results and {} unmapped segments",
-                        event.getDocumentId(),
-                        assemblyResult.getSegmentResults() != null ? assemblyResult.getSegmentResults().size() : 0,
-                        assemblyResult.getUnmappedSegments() != null ? assemblyResult.getUnmappedSegments().size() : 0);
+            if (assemblyResult != null ) {
                 idocXmlStorageService.storeGeneratedXml(assemblyResult.getFinalXml(), event);
-            
             }
         } catch (Exception ex) {
             log.error("Failed to process EDI payload via RAG assembler for document {}", event.getDocumentId(), ex);

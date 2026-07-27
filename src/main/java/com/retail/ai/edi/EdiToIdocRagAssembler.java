@@ -62,6 +62,12 @@ public class EdiToIdocRagAssembler {
 
     public AssemblyResult assemble(String ediXml, String tenant, String transactionTypeCode) {
 
+        
+
+        EdiToIdocRagAssembler.AssemblyResult assemblyResult =null;
+
+         
+
         log.info("========== IDOC Assembly Started (Batched) ==========");
         log.info("Tenant: {}, TransactionType: {}", tenant, transactionTypeCode);
 
@@ -289,7 +295,10 @@ public class EdiToIdocRagAssembler {
         System.err.println("---------> Final IDOC : ");
         System.err.println(currentIdocXml);
 
-        return null;
+        assemblyResult =
+        new EdiToIdocRagAssembler.AssemblyResult(currentIdocXml);
+
+        return assemblyResult;
     }
 
     private String callLlmForBatch(String prompt, int batchNo) {
@@ -349,6 +358,9 @@ public class EdiToIdocRagAssembler {
         List<List<EdiSegment>> result = new ArrayList<>();
         List<EdiSegment> current = new ArrayList<>();
         for (EdiSegment seg : list) {
+
+            //System.out.println(seg.getName()+"==========seg======"+seg.getRawXml());
+
             boolean startsNewItem = "LIN".equals(seg.getName());
             if (startsNewItem && !current.isEmpty()) {
                 result.add(current);
@@ -501,9 +513,7 @@ public class EdiToIdocRagAssembler {
     @Builder
     public static class AssemblyResult {
         private final String finalXml;
-        private final List<SegmentResult> segmentResults;
-        private final List<String> unmappedSegments;
-        private final boolean hasContent;
+        
     }
 
     @Data
