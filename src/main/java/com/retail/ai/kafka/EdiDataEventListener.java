@@ -62,7 +62,7 @@ public class EdiDataEventListener {
         }
 
         try {
-            updateTransformationJobStatus(event.getJobId(), "PROCESSING");
+            updateTransformationJobStatus(event.getJobId(), "EDI_TEXT_TO_EDI_XML");
 
             log.info("Processing EDI payload for document {}", event.getDocumentId());
             EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(mappingChunkProvider, completionService);
@@ -70,6 +70,7 @@ public class EdiDataEventListener {
             EdiToIdocRagAssembler.AssemblyResult assemblyResult = assembler.assemble(event);
 
             if (assemblyResult != null) {
+                updateTransformationJobStatus(event.getJobId(), "EDI_XML_TO_IDOC_XML");
                 idocXmlStorageService.storeGeneratedXml(assemblyResult.getFinalXml(), event);
                 updateTransformationJobStatus(event.getJobId(), "COMPLETED");
             }
@@ -87,6 +88,7 @@ public class EdiDataEventListener {
         try {
             String url = documentServiceBaseUrl + "/documents/jobs/" + jobId;
             restTemplate.put(url, Map.of(
+                    "status", status,
                     "payload", status,
                     "jobName", "edi-transformation"
             ));
