@@ -33,7 +33,7 @@ public class QdrantMappingChunkProvider implements MappingChunkProvider {
             String rawSegment) {
         try {
             String queryText = buildQueryText(tenant, transactionTypeCode, segmentName, rawSegment);
-            List<Double> embedding = ollamaService.createEmbedding(EmbeddingRequest.builder().prompt(queryText).build())
+            List<Double> embedding = ollamaService.createEmbedding(EmbeddingRequest.builder().chunkText(queryText).build())
                     .getEmbedding();
 
             List<Float> queryVector = embedding.stream().map(Double::floatValue).toList();

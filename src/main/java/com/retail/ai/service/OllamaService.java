@@ -2,7 +2,6 @@ package com.retail.ai.service;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -10,21 +9,13 @@ import org.springframework.web.client.RestTemplate;
 
 import com.retail.ai.dto.EmbeddingRequest;
 import com.retail.ai.dto.EmbeddingResponse;
-import com.retail.ai.utilty.PromptHelper;
 
 import io.qdrant.client.QdrantClient;
-import io.qdrant.client.WithPayloadSelectorFactory;
-import io.qdrant.client.grpc.Points.ScoredPoint;
-import io.qdrant.client.grpc.Points.SearchPoints;
-import tools.jackson.databind.ObjectMapper;
-import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class OllamaService {
 
     private final RestTemplate restTemplate;
-
-    private final QdrantClient qdrantClient;
 
     @Value("${ollama.url}")
     private String ollamaUrl;
@@ -40,73 +31,10 @@ public class OllamaService {
 
     public OllamaService(RestTemplate restTemplate, QdrantClient qdrantClient) {
         this.restTemplate = restTemplate;
-        this.qdrantClient = qdrantClient;
+       
     }
 
-    /**
-     * Processes the given command based on the specified session mode. Depending on the session mode, it generates a prompt, calls the Ollama API, and processes the response to return a structured JSON string.
-     * @param command
-     * @param sessionMode
-     * @return
-     * @throws RuntimeException
-     */
-    public String processUnified(String command, String sessionMode) throws RuntimeException {
-    String prompt;
-    String resultXmlString = null;
-    ObjectMapper mapper = new ObjectMapper();
-
-    if("EDI_XML".equalsIgnoreCase(sessionMode)){
-        prompt = PromptHelper.getEdiToXmlPrompt(command);
-        System.out.println("====prompt: === " + prompt);
-        resultXmlString = executeOllamaCall(prompt);
-
-        System.out.println("====resultXmlString: === " + resultXmlString);
-
-        System.out.println("====================");
-        
-    }
-     
     
-
-    return resultXmlString;
-}
-
-/**
- * Helper method to handle common embedding generation and Qdrant vector searching.
- */
-private String searchTopProductField(String textToEmbed, String payloadKey) {
-    EmbeddingResponse embedding = createEmbedding(
-        EmbeddingRequest.builder().prompt(textToEmbed).build()
-    );
-
-    List<Float> queryVector = embedding.getEmbedding().stream()
-        .map(Double::floatValue)
-        .toList();
-
-    SearchPoints searchRequest = SearchPoints.newBuilder()
-        .setCollectionName("products")
-        .addAllVector(queryVector)
-        .setLimit(1)
-        .setWithPayload(WithPayloadSelectorFactory.enable(true))
-        .build();
-
-    try {
-        List<ScoredPoint> qdrantResults = qdrantClient.searchAsync(searchRequest).get();
-        
-        if (qdrantResults != null && !qdrantResults.isEmpty()) {
-            ScoredPoint point = qdrantResults.get(0);
-            System.out.println("Vector Match Score: " + point.getScore());
-            return point.getPayload().get(payloadKey).getStringValue();
-        } else {
-            throw new RuntimeException("No vector search results found for: " + textToEmbed);
-        }
-    } catch (InterruptedException | ExecutionException e) {
-        Thread.currentThread().interrupt(); // Restore interrupted status if InterruptedException
-        throw new RuntimeException("Failed to execute Qdrant vector search", e);
-    }
-}
-
-
 /**
  * Creates an embedding for the given prompt using the Ollama API.  
  * @param request
@@ -116,7 +44,9 @@ private String searchTopProductField(String textToEmbed, String payloadKey) {
     public EmbeddingResponse createEmbedding(EmbeddingRequest request) {
         Map<String, Object> payload = new HashMap<>();
         payload.put("model", emdModel);
-        payload.put("prompt", request.getPrompt());
+        payload.put("prompt", request.getChunkText());
+
+        
 
         String endpoint = embeddingsUrl;
         Map<?, ?> response = restTemplate.postForObject(endpoint, payload, Map.class);

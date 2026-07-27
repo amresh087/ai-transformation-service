@@ -52,9 +52,7 @@ public class EdiDataEventListener {
             EdiToIdocRagAssembler assembler = new EdiToIdocRagAssembler(mappingChunkProvider,completionService);
 
             EdiToIdocRagAssembler.AssemblyResult assemblyResult = assembler.assemble(
-                    event.getPayload(),
-                    event.getTenant(),
-                    event.getTransactionTypeCode());
+                  event );
 
             if (assemblyResult != null ) {
                 idocXmlStorageService.storeGeneratedXml(assemblyResult.getFinalXml(), event);

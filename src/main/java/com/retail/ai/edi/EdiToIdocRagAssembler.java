@@ -1,35 +1,20 @@
 package com.retail.ai.edi;
 
-// NOTE: adjust package/imports to match your actual project structure.
-//
-// CHANGES IN THIS VERSION:
-//
-//   1. NEW: expectedPosexCodesForBatch, built the same way
-//      expectedParvwCodesForBatch already was (seed from what's already in
-//      idocBeforeBatch, plus any NEW LIN line numbers this batch
-//      introduces). Passed into the 5-arg IdocXmlValidator.validate(...)
-//      overload so fabricated POSEX values (with no real source LIN) get
-//      caught the same way fabricated PARVW values now do.
-//
-//   2. buildCorrectivePrompt(...) calls now pass idocBeforeBatch and this
-//      batch's raw segment text, so a corrective retry has the real
-//      ground truth available instead of only the defective draft and a
-//      list of error descriptions -- this is what was silently causing
-//      retries to fabricate plausible-looking values (e.g. inventing
-//      ITEM1003/NETWR=40.00 just to satisfy "POSEX=1 must exist", or
-//      PARVW="SU" with no source NAD) instead of recovering the real data.
-
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import com.retail.ai.dto.CompletionRequest;
 import com.retail.ai.dto.CompletionResponse;
+import com.retail.ai.dto.EdiDataEvent;
 import com.retail.ai.service.CompletionService;
 import com.retail.ai.utilty.PromptHelper;
+
 import lombok.Builder;
 import lombok.Data;
 
@@ -60,19 +45,18 @@ public class EdiToIdocRagAssembler {
         }
     }
 
-    public AssemblyResult assemble(String ediXml, String tenant, String transactionTypeCode) {
-
-        
-
+    public AssemblyResult assemble(EdiDataEvent event) {
+       
+       // event.getPayload(),
+                //    event.getTenant(),
+                 //   event.getTransactionTypeCode()
+       
         EdiToIdocRagAssembler.AssemblyResult assemblyResult =null;
-
-         
-
         log.info("========== IDOC Assembly Started (Batched) ==========");
-        log.info("Tenant: {}, TransactionType: {}", tenant, transactionTypeCode);
+        log.info("Tenant: {}, TransactionType: {}", event.getTenant(), event.getTransactionTypeCode());
 
         EdiXmlParser parser = new EdiXmlParser();
-        List<EdiSegment> segments = parser.parse(ediXml);
+        List<EdiSegment> segments = parser.parse(event.getPayload());
         String expectedCredat = extractExpectedCredat(segments);
 
         String currentIdocXml = """
@@ -109,8 +93,8 @@ public class EdiToIdocRagAssembler {
             LinkedHashMap<String, MappingChunk> chunkMap = new LinkedHashMap<>();
             for (EdiSegment segment : batch) {
                 List<MappingChunk> chunksForSegment = mappingChunkProvider.fetchMappingChunk(
-                        tenant,
-                        transactionTypeCode,
+                        event.getTenant(),
+                        event.getTransactionTypeCode(),
                         segment.getName(),
                         segment.getRawXml());
 

@@ -10,5 +10,7 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class EmbeddingRequest {
-    private String prompt;
+   private String chunkText;
+
 }
+

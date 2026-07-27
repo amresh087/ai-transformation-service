@@ -24,12 +24,7 @@ public class AIController {
         this.ollamaService = ollamaService;
     }
 
-    @PostMapping("/intent")
-    public String getIntent(@RequestBody AIRequest request, @RequestParam(required = false) String sessionMode) {
-        // We pass the sessionMode flag from the frontend directly to the service layer
-        return ollamaService.processUnified(request.getCommand(), sessionMode);
-    }
-
+    
     @PostMapping("/embeddings")
     public ResponseEntity<EmbeddingResponse> createEmbedding(@RequestBody EmbeddingRequest request) {
         EmbeddingResponse response = ollamaService.createEmbedding(request);
