@@ -27,6 +27,10 @@ ollama:
   embeddings-url: http://localhost:11434/api/embeddings
   model: qwen2.5-coder:7b
   embedding-model: nomic-embed-text
+  #url: https://eric-dna-grey-cultural.trycloudflare.com/api/generate
+  #embeddings-url: https://eric-dna-grey-cultural.trycloudflare.com/api/embeddings
+  #model: qwen3.5:9b
+  #embedding-model: nomic-embed-text  
 
 qdrant:
   host: localhost
